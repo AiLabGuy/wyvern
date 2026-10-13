@@ -25,6 +25,8 @@ jobs:
       BUILD_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
+      - name: Toolchain
+        run: swift --version && xcodebuild -version
       - name: Point the built-in update source at this repository
         run: |
           owner="${GITHUB_REPOSITORY%%/*}"
