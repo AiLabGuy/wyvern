@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Wyvern Contributors
+# SPDX-License-Identifier: MIT
+
+title = "Wyvern"
+
+[extend]
+useDefault = true
+
+# Two generic-api-key hits on ordinary identifiers are matched by exact source line. Nothing else is exempt.
+[allowlist]
+regexTarget = "line"
+regexes = [
+  '''^\s*let privateKey: Curve25519\.Signing\.PrivateKey\s*$''',
+  '''^\s*public static let defaultsMigrationMarkerKey = "legacy.data.migrated"\s*$''',
+]

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Wyvern Contributors
+# SPDX-License-Identifier: MIT
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compliance
+        run: bash scripts/compliance-check.sh
+      - name: Build
+        run: swift build -c release
+      - name: Unit tests
+        run: swift test --filter WyvernCoreTests
+      - name: App bundle
+        run: bash scripts/build-app.sh

@@ -1,0 +1,19 @@
+# Per-pattern exemptions: relative-path:pattern:substring
+# An entry exempts only that named forbidden pattern, and only on lines that contain the substring.
+# It does not exempt any other pattern on the line.
+# FORBIDDEN_EXTRA patterns cannot be exempted, even when an entry names them.
+NOTICE:chromium:uses the system WKWebView and bundles no
+NOTICE:cef:uses the system WKWebView and bundles no
+NOTICE:electron:uses the system WKWebView and bundles no
+NOTICE:grok:Created with Grok
+CODE_OF_CONDUCT.md:cef:gracefully
+Sources/Wyvern/BookmarkImportSheetController.swift:affiliate:not affiliated
+Sources/WyvernCore/AppInfo.swift:affiliate:not affiliated
+# Public WebKit property. The three letters sit inside this identifier.
+Sources/Wyvern/BrowserTab.swift:cef:sourceFrame
+ASSETS.md:grok:Provenance: Initial concept generated with Grok Imagine (SpaceXAI)
+ASSETS.md:xai:Provenance: Initial concept generated with Grok Imagine (SpaceXAI)
+ASSETS.md:grok:a prior Grok-generated reference; Created with Grok.
+ASSETS.md:grok:and cleaned up from the Grok output by a human contributor
+THIRD_PARTY_LICENSES.md:grok:Created with Grok
+scripts/gen-third-party.sh:grok:Created with Grok

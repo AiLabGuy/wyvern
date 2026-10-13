@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Wyvern Contributors
+# SPDX-License-Identifier: MIT
+
+.build/
+build/
+DerivedData/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.dmg
+*.icns
+.env
+.DS_Store
+__pycache__/
+*.pyc
+_internal-do-not-ship/
+.env.*
+*.key
+*.pem
+*.p12
+*.minisign
+wyvern-update.key

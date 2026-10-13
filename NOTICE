@@ -1,0 +1,9 @@
+Wyvern Browser
+Copyright 2026 Wyvern Contributors
+
+This product bundles no third-party code.
+It uses Apple system frameworks only.
+
+Wyvern Browser uses the system WKWebView and bundles no Chromium, CEF, or Electron.
+
+The app icon (assets/icon/*) is licensed CC-BY-4.0 by Wyvern Browser contributors, with no trademark rights granted. Created with Grok. See ASSETS.md and TRADEMARKS.md.

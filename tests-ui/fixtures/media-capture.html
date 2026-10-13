@@ -1,0 +1,32 @@
+<!--
+SPDX-FileCopyrightText: 2026 Wyvern Contributors
+SPDX-License-Identifier: MIT
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Media capture test</title>
+<style>
+  /* Large target: the runner clicks the centre of this button with a real HID mouse event. */
+  #ask { font-size: 20px; padding: 18px 36px; min-width: 260px; }
+</style>
+</head>
+<body>
+<h1>Media capture test</h1>
+<button id="ask" type="button" aria-label="Start microphone">Start microphone</button>
+<script>
+document.getElementById("ask").addEventListener("click", function () {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    document.title = "DENIED";
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function () {
+    document.title = "ALLOWED";
+  }).catch(function () {
+    document.title = "DENIED";
+  });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+version = 1
+
+[[annotations]]
+path = [
+  "README.md",
+  "SECURITY.md",
+  "CONTRIBUTING.md",
+  "PRIVACY.md",
+  "NOTICE",
+  "THIRD_PARTY_LICENSES.md",
+  "docs/**",
+  ".gitignore",
+  ".compliance/**",
+  "Resources/Info.plist",
+  "Resources/Info.plist.in",
+  "config/product.env",
+  "Wyvern.entitlements",
+  ".gitleaks.toml",
+  ".gitleaksignore",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Wyvern Contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = "CODE_OF_CONDUCT.md"
+precedence = "override"
+SPDX-FileCopyrightText = "Contributor Covenant contributors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+
+[[annotations]]
+path = [
+  "tests-ui/fixtures/attach.bin",
+  "tests-ui/fixtures/blob.bin",
+  "tests-ui/fixtures/data.bin",
+  "tests-ui/fixtures/bench.png",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Wyvern Contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = [
+  "Tests/WyvernCoreTests/Fixtures/places.sqlite",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite-wal",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite-shm",
+  "Tests/WyvernCoreTests/Fixtures/bookmarks.html",
+  "Tests/WyvernCoreTests/Fixtures/browser-family.json",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2026 Wyvern Contributors"
+SPDX-License-Identifier = "CC0-1.0"
