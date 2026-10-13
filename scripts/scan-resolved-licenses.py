@@ -135,7 +135,7 @@ def main() -> int:
     if rejected(body, "THIRD_PARTY_LICENSES.md"):
         return 1
 
-    acknowledgements = ROOT / "Sources" / "App1" / "Acknowledgements.swift"
+    acknowledgements = ROOT / "Sources" / "Wyvern" / "Acknowledgements.swift"
     if acknowledgements.is_file():
         notice = acknowledgements.read_text(encoding="utf-8")
         if COMMIT not in notice or VERSION not in notice or "2019-2022" not in notice:

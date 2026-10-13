@@ -90,15 +90,15 @@
 			</array>
 		</dict>
 	</array>
-	<key>App1GitCommit</key>
+	<key>WyvernGitCommit</key>
 	<string></string>
-	<key>App1UpdateFeedURL</key>
+	<key>WyvernUpdateFeedURL</key>
 	<string>https://github.com/AiLabGuy/wyvern/releases/latest/download/latest.json</string>
-	<key>App1UpdatePublicKey</key>
+	<key>WyvernUpdatePublicKey</key>
 	<string>RELEASE_PUBLIC_KEY_PLACEHOLDER</string>
-	<key>App1UpdateDevSource</key>
+	<key>WyvernUpdateDevSource</key>
 	<string></string>
-	<key>App1DMGBasename</key>
+	<key>WyvernDMGBasename</key>
 	<string>WyvernBrowser</string>
 </dict>
 </plist>

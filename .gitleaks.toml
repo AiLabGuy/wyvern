@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Wyvern Contributors
 # SPDX-License-Identifier: MIT
 
-title = "App1"
+title = "Wyvern"
 
 [extend]
 useDefault = true

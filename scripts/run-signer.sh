@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Wyvern Contributors
 # SPDX-License-Identifier: MIT
 
-# Runs App1UpdateSigner (or any command) under a 60 second alarm. macOS has no timeout(1);
+# Runs WyvernUpdateSigner (or any command) under a 60 second alarm. macOS has no timeout(1);
 # perl's alarm survives exec, so SIGALRM ends the signer itself. A keychain dialog or any
 # other prompt that would block CI becomes a loud SIGNING_TIMEOUT failure, never a hang.
 

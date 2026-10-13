@@ -157,7 +157,7 @@ key_location_ok() {
   fi
   case "$rel" in
     Resources/Info.plist | Resources/Info.plist.in)
-      if [[ "$text" == *App1UpdatePublicKey* || "$prev" == *App1UpdatePublicKey* ]]; then
+      if [[ "$text" == *WyvernUpdatePublicKey* || "$prev" == *WyvernUpdatePublicKey* ]]; then
         return 0
       fi
       ;;
@@ -342,23 +342,23 @@ if [[ "$BUNDLE_NAME" != "$DISPLAY_NAME" ]]; then
   echo "BUNDLE_NAME does not match DISPLAY_NAME"
   status=1
 fi
-if ! grep -Fq "displayName = \"${DISPLAY_NAME}\"" Sources/App1Core/AppInfo.swift; then
+if ! grep -Fq "displayName = \"${DISPLAY_NAME}\"" Sources/WyvernCore/AppInfo.swift; then
   echo "AppInfo.displayName does not match DISPLAY_NAME"
   status=1
 fi
-if ! grep -Fq "shortName = \"${DISPLAY_NAME}\"" Sources/App1Core/AppInfo.swift; then
+if ! grep -Fq "shortName = \"${DISPLAY_NAME}\"" Sources/WyvernCore/AppInfo.swift; then
   echo "AppInfo.shortName does not match DISPLAY_NAME"
   status=1
 fi
-if ! grep -Fq "productName = \"${PRODUCT_NAME}\"" Sources/App1Core/AppInfo.swift; then
+if ! grep -Fq "productName = \"${PRODUCT_NAME}\"" Sources/WyvernCore/AppInfo.swift; then
   echo "AppInfo.productName does not match PRODUCT_NAME"
   status=1
 fi
-if ! grep -Fq "fallbackBundleIdentifier = \"${BUNDLE_ID}\"" Sources/App1Core/AppInfo.swift; then
+if ! grep -Fq "fallbackBundleIdentifier = \"${BUNDLE_ID}\"" Sources/WyvernCore/AppInfo.swift; then
   echo "AppInfo.fallbackBundleIdentifier does not match BUNDLE_ID"
   status=1
 fi
-if ! grep -Fq "marketingVersion = \"${VERSION}\"" Sources/App1Core/AppInfo.swift; then
+if ! grep -Fq "marketingVersion = \"${VERSION}\"" Sources/WyvernCore/AppInfo.swift; then
   echo "AppInfo.marketingVersion does not match VERSION"
   status=1
 fi

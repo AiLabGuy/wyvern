@@ -88,11 +88,11 @@ rm -rf "$app_path"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$bin_path" "$app_path/Contents/MacOS/${EXECUTABLE_NAME}"
 chmod 755 "$app_path/Contents/MacOS/${EXECUTABLE_NAME}"
-if [[ -z "${APP1_GIT_COMMIT:-}" ]]; then
-  APP1_GIT_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+if [[ -z "${WYVERN_GIT_COMMIT:-}" ]]; then
+  WYVERN_GIT_COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
 fi
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
-export APP1_GIT_COMMIT UPDATE_FEED_URL UPDATE_DEV_SOURCE BUILD_NUMBER
+export WYVERN_GIT_COMMIT UPDATE_FEED_URL UPDATE_DEV_SOURCE BUILD_NUMBER
 generate_info_plist "$app_path/Contents/Info.plist"
 if [[ "${WYVERN_DEV_UPDATER:-}" == "1" ]]; then
   # URLSession is subject to ATS. Dev builds fetch the LAN feed over http.
@@ -124,11 +124,11 @@ echo "Final binary:"
 lipo -info "$app_path/Contents/MacOS/${EXECUTABLE_NAME}"
 
 xattr -cr "$app_path"
-codesign --force --deep -s - --options runtime --entitlements App1.entitlements "$app_path"
+codesign --force --deep -s - --options runtime --entitlements Wyvern.entitlements "$app_path"
 # Ad-hoc signatures get a new cdhash every build, so macOS privacy (TCC) grants such as the
 # microphone stop matching after each update ("Failed to match existing code requirement").
 # Re-sign the outer bundle with a designated requirement on the bundle id so grants survive updates.
-codesign --force -s - --options runtime --entitlements App1.entitlements \
+codesign --force -s - --options runtime --entitlements Wyvern.entitlements \
   -r="designated => identifier \"${BUNDLE_ID}\"" "$app_path"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 echo "Built ${app_path}"

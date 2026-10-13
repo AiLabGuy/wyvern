@@ -5,18 +5,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "App1",
+    name: "Wyvern",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .library(name: "App1Core", targets: ["App1Core"]),
-        .executable(name: "App1", targets: ["App1"]),
-        .executable(name: "App1UITestRunner", targets: ["App1UITestRunner"]),
-        .executable(name: "App1Bench", targets: ["App1Bench"]),
-        .executable(name: "App1Diag", targets: ["App1Diag"]),
-        .executable(name: "App1UpdateSigner", targets: ["App1UpdateSigner"]),
-        .executable(name: "App1UpdateVerify", targets: ["App1UpdateVerify"])
+        .library(name: "WyvernCore", targets: ["WyvernCore"]),
+        .executable(name: "Wyvern", targets: ["Wyvern"]),
+        .executable(name: "WyvernUITestRunner", targets: ["WyvernUITestRunner"]),
+        .executable(name: "WyvernBench", targets: ["WyvernBench"]),
+        .executable(name: "WyvernDiag", targets: ["WyvernDiag"]),
+        .executable(name: "WyvernUpdateSigner", targets: ["WyvernUpdateSigner"]),
+        .executable(name: "WyvernUpdateVerify", targets: ["WyvernUpdateVerify"])
     ],
     dependencies: [
         // SwiftTerm 1.11.2. Commit b1262db5b6bea699a8260a8c66999436c508ca56.
@@ -29,27 +29,27 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "App1Core",
-            path: "Sources/App1Core",
+            name: "WyvernCore",
+            path: "Sources/WyvernCore",
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
         ),
         .executableTarget(
-            name: "App1",
+            name: "Wyvern",
             dependencies: [
-                "App1Core",
+                "WyvernCore",
                 .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
-            path: "Sources/App1",
+            path: "Sources/Wyvern",
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
         ),
         .testTarget(
-            name: "App1CoreTests",
-            dependencies: ["App1Core"],
-            path: "Tests/App1CoreTests",
+            name: "WyvernCoreTests",
+            dependencies: ["WyvernCore"],
+            path: "Tests/WyvernCoreTests",
             resources: [
                 .copy("Fixtures")
             ],
@@ -58,31 +58,31 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "App1UITestRunner",
-            path: "Sources/App1UITestRunner"
+            name: "WyvernUITestRunner",
+            path: "Sources/WyvernUITestRunner"
         ),
         .executableTarget(
-            name: "App1Bench",
-            dependencies: ["App1Core"],
-            path: "Sources/App1Bench"
+            name: "WyvernBench",
+            dependencies: ["WyvernCore"],
+            path: "Sources/WyvernBench"
         ),
         .executableTarget(
-            name: "App1Diag",
-            dependencies: ["App1Core"],
-            path: "Sources/App1Diag"
+            name: "WyvernDiag",
+            dependencies: ["WyvernCore"],
+            path: "Sources/WyvernDiag"
         ),
         .executableTarget(
-            name: "App1UpdateSigner",
-            dependencies: ["App1Core"],
-            path: "Sources/App1UpdateSigner",
+            name: "WyvernUpdateSigner",
+            dependencies: ["WyvernCore"],
+            path: "Sources/WyvernUpdateSigner",
             linkerSettings: [
                 .linkedFramework("Security")
             ]
         ),
         .executableTarget(
-            name: "App1UpdateVerify",
-            dependencies: ["App1Core"],
-            path: "Sources/App1UpdateVerify"
+            name: "WyvernUpdateVerify",
+            dependencies: ["WyvernCore"],
+            path: "Sources/WyvernUpdateVerify"
         )
     ],
     swiftLanguageVersions: [.v5]

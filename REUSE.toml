@@ -14,7 +14,7 @@ path = [
   "Resources/Info.plist",
   "Resources/Info.plist.in",
   "config/product.env",
-  "App1.entitlements",
+  "Wyvern.entitlements",
   ".gitleaks.toml",
   ".gitleaksignore",
 ]
@@ -42,12 +42,12 @@ SPDX-License-Identifier = "MIT"
 
 [[annotations]]
 path = [
-  "Tests/App1CoreTests/Fixtures/places.sqlite",
-  "Tests/App1CoreTests/Fixtures/places-wal/places.sqlite",
-  "Tests/App1CoreTests/Fixtures/places-wal/places.sqlite-wal",
-  "Tests/App1CoreTests/Fixtures/places-wal/places.sqlite-shm",
-  "Tests/App1CoreTests/Fixtures/bookmarks.html",
-  "Tests/App1CoreTests/Fixtures/browser-family.json",
+  "Tests/WyvernCoreTests/Fixtures/places.sqlite",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite-wal",
+  "Tests/WyvernCoreTests/Fixtures/places-wal/places.sqlite-shm",
+  "Tests/WyvernCoreTests/Fixtures/bookmarks.html",
+  "Tests/WyvernCoreTests/Fixtures/browser-family.json",
 ]
 precedence = "override"
 SPDX-FileCopyrightText = "2026 Wyvern Contributors"

@@ -55,8 +55,8 @@ Each release also carries a `.sha256` file; check the download with `shasum -a 2
 git clone https://github.com/AiLabGuy/wyvern.git
 cd wyvern
 
-swift build -c release --product App1   # compile only
-swift test --filter App1CoreTests       # unit tests
+swift build -c release --product Wyvern   # compile only
+swift test --filter WyvernCoreTests       # unit tests
 bash scripts/build-app.sh               # builds "build/Wyvern Browser.app" (ad-hoc signed)
 bash scripts/make-dmg.sh                # optional: disk image from the built app
 ```
@@ -118,7 +118,7 @@ You can serve updates from your own GitHub Releases, a Gitea generic package, or
    - GitHub Releases: push a `v<version>` tag and let `.github/workflows/release.yml` do it (repo secrets `MINISIGN_SECRET_KEY`, `MINISIGN_PASSWORD`). Feed URL: `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`.
    - Gitea generic package: upload both files to one package version, e.g. `https://gitea.example.com/api/packages/<owner>/generic/wyvern/latest/latest.json` (the package must be public).
    - Any HTTPS host: put both files in one folder.
-   Sign and package each release as shown in [docs/UPDATES.md](docs/UPDATES.md), and check it with `swift run App1UpdateVerify` before publishing.
+   Sign and package each release as shown in [docs/UPDATES.md](docs/UPDATES.md), and check it with `swift run WyvernUpdateVerify` before publishing.
 4. **Point Wyvern at it.** Either open **Settings > Updates** and enter the feed URL and public key (they are saved together; **Reset to Default** goes back), or set `UPDATE_FEED_URL` and `UPDATE_PUBLIC_KEY` in `config/product.env` and rebuild. Values in `config/product.env` take precedence over the environment. A release build accepts only a public `https://host[:port]/path` URL with no user info, query, fragment, or private/local host.
 
 ## License
