@@ -25,12 +25,12 @@ Each release also carries a `.sha256` file; check the download with `shasum -a 2
 
 ## Screenshots
 
-> Screenshots coming soon.
-
-<!-- TODO(designer): add images under assets/ and replace these placeholders -->
-- `![Main window](assets/screenshots/main-window.png)`
-- `![Network health](assets/screenshots/network-health.png)`
-- `![Terminal tab](assets/screenshots/terminal-tab.png)`
+| | |
+|---|---|
+| ![Main window (dark)](docs/screenshots/01-main-window-dark.png)<br>A fast, minimal browser for macOS. | ![Light theme](docs/screenshots/07-main-window-light.png)<br>Light and dark themes that follow your system. |
+| ![Network health](docs/screenshots/02-network-health.png)<br>Live network health for the current site. | ![Terminal tabs](docs/screenshots/03-terminal-tabs.png)<br>Terminal tabs alongside your web tabs. |
+| ![Search tabs](docs/screenshots/05-search-tabs.png)<br>Search open tabs (Cmd+Shift+A). | ![Settings](docs/screenshots/04-settings.png)<br>Clean, simple settings. |
+| ![Guided tour](docs/screenshots/06-guided-tour.png)<br>A short guided tour on first launch. | |
 
 ## Features
 
