@@ -1,0 +1,3 @@
+# One extended regex per line. Matches fail the compliance check.
+# Add owner names, internal hostnames, or addresses you never want committed.
+BEGIN (RSA|EC|OPENSSH|DSA|ENCRYPTED)? ?PRIVATE KEY

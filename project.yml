@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: 2026 Wyvern Contributors
+# SPDX-License-Identifier: MIT
+
+name: App1
+packages:
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.11.2
+options:
+  deploymentTarget:
+    macOS: "13.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_APP_SANDBOX: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WYVERN_DEV_UPDATER"
+targets:
+  App1Core:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/App1Core
+    settings:
+      PRODUCT_NAME: App1Core
+      PRODUCT_MODULE_NAME: App1Core
+      PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern.core
+      DEFINES_MODULE: YES
+      GENERATE_INFOPLIST_FILE: YES
+      SKIP_INSTALL: YES
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+  App1:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/App1
+    dependencies:
+      - target: App1Core
+      - package: SwiftTerm
+        product: SwiftTerm
+    settings:
+      PRODUCT_NAME: Wyvern Browser
+      PRODUCT_MODULE_NAME: App1
+      PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern
+      GENERATE_INFOPLIST_FILE: NO
+      INFOPLIST_FILE: Resources/Info.plist
+      CODE_SIGN_ENTITLEMENTS: App1.entitlements
+      CODE_SIGN_STYLE: Manual
+      CODE_SIGN_IDENTITY: "-"
+      ENABLE_HARDENED_RUNTIME: YES
+      ENABLE_APP_SANDBOX: NO
+      LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+    postBuildScripts:
+      - name: Copy legal notices and icon
+        basedOnDependencyAnalysis: false
+        script: |
+          set -eu
+          "${SRCROOT}/scripts/make-icns.sh"
+          dest="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
+          mkdir -p "${dest}"
+          cp "${SRCROOT}/LICENSE" "${SRCROOT}/NOTICE" "${SRCROOT}/THIRD_PARTY_LICENSES.md" "${dest}/"
+          cp "${SRCROOT}/build/AppIcon.icns" "${dest}/AppIcon.icns"
+  App1CoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/App1CoreTests
+        excludes:
+          - Fixtures
+    resources:
+      - path: Tests/App1CoreTests/Fixtures
+        type: folder
+    dependencies:
+      - target: App1Core
+    settings:
+      PRODUCT_NAME: App1CoreTests
+      PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern.tests
+      GENERATE_INFOPLIST_FILE: YES
+      TEST_HOST: ""
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+schemes:
+  App1:
+    build:
+      targets:
+        App1: all
+        App1Core: all
+        App1CoreTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - App1CoreTests

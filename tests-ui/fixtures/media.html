@@ -1,0 +1,22 @@
+<!--
+SPDX-FileCopyrightText: 2026 Wyvern Contributors
+SPDX-License-Identifier: MIT
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Media test page</title>
+</head>
+<body>
+<h1>Media test page</h1>
+<iframe srcdoc="<p>srcdoc frame</p>" title="srcdoc"></iframe>
+<iframe src="/frame.html" title="frame"></iframe>
+<iframe src="/blob.bin" title="blob"></iframe>
+<audio src="/tone.wav"></audio>
+<a href="/attach.bin" download>save a copy</a>
+<script>
+fetch("/data.bin").catch(function () {});
+</script>
+</body>
+</html>

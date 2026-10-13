@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Wyvern</string>
+	<key>CFBundleExecutable</key>
+	<string>Wyvern Browser</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.example.wyvern</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Wyvern</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSFileQuarantineEnabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright 2026 Wyvern Contributors</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Websites you allow can use speech recognition for dictation.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A website you visit can ask to use your microphone. Wyvern asks you first, for each site.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A website you visit can ask to use your camera. Wyvern asks you first, for each site.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>A terminal command can send Apple Events. Wyvern asks you first.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>A terminal command can use your Desktop. Wyvern asks you first.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>A terminal command can use your Documents. Wyvern asks you first.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>A terminal command can use your Downloads. Wyvern asks you first.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>A terminal command can use a removable volume. Wyvern asks you first.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A terminal command can use your photos. Wyvern asks you first.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>A terminal command can use your contacts. Wyvern asks you first.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLName</key>
+			<string>Web site URL</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>http</string>
+				<string>https</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>HTML document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.html</string>
+				<string>public.xhtml</string>
+				<string>public.url</string>
+			</array>
+		</dict>
+	</array>
+	<key>App1GitCommit</key>
+	<string></string>
+	<key>App1UpdateFeedURL</key>
+	<string>https://github.com/AiLabGuy/wyvern/releases/latest/download/latest.json</string>
+	<key>App1UpdatePublicKey</key>
+	<string>RELEASE_PUBLIC_KEY_PLACEHOLDER</string>
+	<key>App1UpdateDevSource</key>
+	<string></string>
+	<key>App1DMGBasename</key>
+	<string>WyvernBrowser</string>
+</dict>
+</plist>

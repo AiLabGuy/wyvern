@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: 2026 Wyvern Contributors
+# SPDX-License-Identifier: MIT
+#
+# Builds, signs and publishes a release when a tag like v0.2.0 is pushed.
+# Required repo secrets:
+#   MINISIGN_SECRET_KEY  contents of the secret key made by scripts/new-release-key.sh
+#   MINISIGN_PASSWORD    its password
+# config/product.env must already pin the matching public key (UPDATE_PUBLIC_KEY).
+# Uploads <DMG_BASENAME>-<version>-b<build>.zip and latest.json to the GitHub release, which is what
+# https://github.com/<owner>/<repo>/releases/latest/download/latest.json serves.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the built-in update source at this repository
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
+          sed -i '' -e "s|GITHUB_OWNER|${owner}|g" -e "s|GITHUB_REPO|${repo}|g" config/product.env
+          if grep -q '^UPDATE_PUBLIC_KEY=.*PLACEHOLDER' config/product.env; then
+            echo "::error::UPDATE_PUBLIC_KEY is still a placeholder. Run scripts/new-release-key.sh and commit config/product.env."
+            exit 1
+          fi
+      - name: Build app and disk image
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          bash scripts/build-app.sh
+          bash scripts/make-dmg.sh
+      - name: Sign and package
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          brew install minisign
+          . scripts/load-product-env.sh
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$tag_version" != "$VERSION" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match VERSION=${VERSION} in config/product.env"
+            exit 1
+          fi
+          dmg="${DMG_BASENAME}-${VERSION}.dmg"
+          zip="${DMG_BASENAME}-${VERSION}-b${BUILD_NUMBER}.zip"
+          keyfile="$RUNNER_TEMP/release.key"
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > "$keyfile"
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign -S -l -s "$keyfile" -m "build/${dmg}.sha256" \
+            -t "version=${VERSION} build=${BUILD_NUMBER} commit=${GITHUB_SHA} file=${dmg}"
+          rm -f "$keyfile"
+          minisign -V -P "$UPDATE_PUBLIC_KEY" -m "build/${dmg}.sha256" \
+            || { echo "::error::signature does not verify against UPDATE_PUBLIC_KEY"; exit 1; }
+          (cd build && zip -X -j "$zip" "$dmg" "${dmg}.sha256" "${dmg}.sha256.minisig")
+          python3 - "$VERSION" "$BUILD_NUMBER" "$GITHUB_SHA" "$zip" > build/latest.json <<'PY'
+          import json, sys
+          version, build, commit, zip_name = sys.argv[1:]
+          print(json.dumps({"format": 1, "version": version, "build": int(build),
+                            "commit": commit, "zip_url": zip_name}, indent=2))
+          PY
+          echo "ZIP=build/$zip" >> "$GITHUB_ENV"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ZIP" build/latest.json \
+            --title "$GITHUB_REF_NAME" --notes "Signed release. Verify in-app or with App1UpdateVerify."

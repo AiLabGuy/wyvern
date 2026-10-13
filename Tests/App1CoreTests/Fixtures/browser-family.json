@@ -1,0 +1,34 @@
+{
+  "roots": {
+    "bookmark_bar": {
+      "children": [
+        {
+          "children": [
+            {"name": "Dev docs", "type": "url", "url": "https://docs.example.org/"},
+            {"name": "Bad", "type": "url", "url": "javascript:alert(1)"}
+          ],
+          "name": "Dev",
+          "type": "folder"
+        },
+        {"name": "Home", "type": "url", "url": "https://example.com/"}
+      ],
+      "name": "Bookmarks Bar",
+      "type": "folder"
+    },
+    "other": {
+      "children": [
+        {"name": "Dup", "type": "url", "url": "https://example.com"},
+        {"name": "Other site", "type": "url", "url": "http://localhost/other"}
+      ],
+      "name": "Other Bookmarks",
+      "type": "folder"
+    },
+    "synced": {
+      "children": [
+        {"name": "Phone", "type": "url", "url": "https://mobile.example/app"}
+      ],
+      "name": "Mobile Bookmarks",
+      "type": "folder"
+    }
+  }
+}
