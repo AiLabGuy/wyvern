@@ -57,8 +57,12 @@ final class CookiePolicyController {
     private func applyStorePolicy(_ policy: CookiePolicy) {
         let store = WKWebsiteDataStore.default().httpCookieStore
         if #available(macOS 14.0, *) {
-            let wkPolicy: WKCookiePolicy = policy.disallowsHTTPCookies ? .disallow : .allow
-            store.setCookiePolicy(wkPolicy) { }
+            // Leave the type implicit: the SDK names it WKCookiePolicy or WKHTTPCookieStore.CookiePolicy.
+            if policy.disallowsHTTPCookies {
+                store.setCookiePolicy(.disallow) { }
+            } else {
+                store.setCookiePolicy(.allow) { }
+            }
         }
     }
 }

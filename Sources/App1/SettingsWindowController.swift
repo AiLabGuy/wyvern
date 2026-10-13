@@ -1759,10 +1759,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func selectPopup(tag: Int, in popup: NSPopUpButton, fallback: Int) {
-        if popup.item(withTag: tag) != nil {
-            popup.selectItem(withTag: tag)
-        } else if popup.item(withTag: fallback) != nil {
-            popup.selectItem(withTag: fallback)
+        let index = popup.indexOfItem(withTag: tag)
+        let fallbackIndex = popup.indexOfItem(withTag: fallback)
+        if index >= 0 {
+            popup.selectItem(at: index)
+        } else if fallbackIndex >= 0 {
+            popup.selectItem(at: fallbackIndex)
         }
     }
 
