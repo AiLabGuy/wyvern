@@ -123,12 +123,21 @@ public struct VerifiedZip: Equatable, Sendable {
     public var dmgURL: URL
     public var comment: TrustedUpdateComment
     public var zipName: UpdateZipName
+    /// SHA-256 of the disk image at verification time. Install hashes the file again before mount.
+    public var dmgSHA256: String
 
-    public init(directory: URL, dmgURL: URL, comment: TrustedUpdateComment, zipName: UpdateZipName) {
+    public init(
+        directory: URL,
+        dmgURL: URL,
+        comment: TrustedUpdateComment,
+        zipName: UpdateZipName,
+        dmgSHA256: String
+    ) {
         self.directory = directory
         self.dmgURL = dmgURL
         self.comment = comment
         self.zipName = zipName
+        self.dmgSHA256 = dmgSHA256
     }
 }
 
@@ -159,7 +168,7 @@ public enum UpdatePackage {
             throw UpdatePackageError.tooLarge
         }
         // Every entry name is checked before any extractor touches the archive.
-        try UpdateZipInspector.inspect(zipAt: zipURL, allowed: zipName.memberNames)
+        let entries = try UpdateZipInspector.inspect(zipAt: zipURL, allowed: zipName.memberNames)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("wyvern-zip-\(UUID().uuidString)", isDirectory: true)
         let payload = directory.appendingPathComponent("payload", isDirectory: true)
@@ -173,6 +182,7 @@ public enum UpdatePackage {
                 throw UpdatePackageError.pathTraversal(siblings.filter { $0 != "payload" }.first ?? "")
             }
             let members = try validateMembers(in: payload, allowed: zipName.memberNames)
+            try enforceExtractedSizes(members, declared: entries)
             guard let dmgURL = members[zipName.dmgName],
                   let shaURL = members[zipName.shaName],
                   let sigURL = members[zipName.sigName] else {
@@ -204,7 +214,14 @@ public enum UpdatePackage {
                     throw UpdatePackageError.notNewer
                 }
             }
-            return VerifiedZip(directory: directory, dmgURL: dmgURL, comment: comment, zipName: zipName)
+            let digest = SHA256Util.hex(Data(SHA256.hash(data: dmg)))
+            return VerifiedZip(
+                directory: directory,
+                dmgURL: dmgURL,
+                comment: comment,
+                zipName: zipName,
+                dmgSHA256: digest
+            )
         } catch {
             try? FileManager.default.removeItem(at: directory)
             throw error
@@ -295,6 +312,35 @@ public enum UpdatePackage {
         guard url.path.withCString({ chmod($0, 0o700) }) == 0 else {
             throw UpdatePackageError.extractFailed
         }
+    }
+
+    /// The bytes on disk must not be larger than the size the central directory declared.
+    public static func enforceExtractedSizes(_ members: [String: URL], declared: [ZipEntryInfo]) throws {
+        var total: UInt64 = 0
+        for entry in declared {
+            guard let url = members[entry.name] else { throw UpdatePackageError.missingMember }
+            var info = stat()
+            guard url.path.withCString({ lstat($0, &info) }) == 0 else {
+                throw UpdatePackageError.notRegularFile
+            }
+            if info.st_size < 0 {
+                throw UpdatePackageError.tooLarge
+            }
+            let size = UInt64(info.st_size)
+            if size > UInt64(entry.uncompressedSize) || size > UpdateZipInspector.maxTotalUncompressed {
+                throw UpdatePackageError.tooLarge
+            }
+            if total > UpdateZipInspector.maxTotalUncompressed - size {
+                throw UpdatePackageError.tooLarge
+            }
+            total += size
+        }
+    }
+
+    /// Re-read a file and compare it to a digest already checked against the signature.
+    public static func fileMatchesDigest(_ url: URL, hex expected: String) -> Bool {
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return false }
+        return SHA256Util.hex(Data(SHA256.hash(data: data))) == expected
     }
 
     public static func assertRegularFile(_ url: URL) throws {

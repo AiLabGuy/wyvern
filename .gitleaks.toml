@@ -6,10 +6,11 @@ title = "Wyvern"
 [extend]
 useDefault = true
 
-# Two generic-api-key hits on ordinary identifiers are matched by exact source line. Nothing else is exempt.
+# Generic-api-key hits on ordinary identifiers and a fake test key ID are matched by exact source line. Nothing else is exempt.
 [allowlist]
 regexTarget = "line"
 regexes = [
   '''^\s*let privateKey: Curve25519\.Signing\.PrivateKey\s*$''',
+  '''^\s*keyID: "ABCDEF0123456789",\s*$''',
   '''^\s*public static let defaultsMigrationMarkerKey = "didMigrateFromOrgPlaceholderApp1"\s*$''',
 ]

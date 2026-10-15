@@ -8,21 +8,20 @@ import Foundation
 /// HTTPS never downgrades to HTTP. Dev HTTP stays on the same private host.
 public enum UpdateRedirectPolicy {
     public static func shouldFollow(from: URL, to: URL?, allowsDevHTTP: Bool) -> Bool {
-        guard let to, let toHost = to.host, !toHost.isEmpty else { return false }
-        guard to.user == nil, to.password == nil else { return false }
-        switch to.scheme?.lowercased() {
-        case "https":
-            return true
-        case "http":
-            guard isDevUpdaterCompiled, allowsDevHTTP,
-                  from.scheme?.lowercased() == "http",
-                  let fromHost = from.host, fromHost.lowercased() == toHost.lowercased() else {
-                return false
-            }
-            return UpdateTransportPolicy.isPrivateNetworkHost(toHost)
-        default:
+        guard let to else { return false }
+        guard case .success(let destination) = UpdateTransportPolicy.checkURL(to, allowsDevHTTP: allowsDevHTTP) else {
             return false
         }
+        let toHost = destination.host?.lowercased() ?? ""
+        let fromHost = from.host?.lowercased() ?? ""
+        if destination.scheme?.lowercased() == "http" {
+            guard from.scheme?.lowercased() == "http", fromHost == toHost else { return false }
+        }
+        // A public source may redirect to a public CDN. It may not redirect onto the LAN.
+        if !allowsDevHTTP, NetworkHostPolicy.isNonPublic(toHost), toHost != fromHost {
+            return false
+        }
+        return true
     }
 }
 
@@ -104,6 +103,8 @@ public enum UpdateUserMessage {
             return "The update source address must not contain a user name or password."
         case .httpRejected, .publicHTTPRejected:
             return "The update source must use HTTPS."
+        case .restrictedHost:
+            return "The update address must be public HTTPS, or the same host as the update source. Addresses on this computer are not allowed."
         case .missingKey:
             return "Enter the public key for this update source. A source is never used without its key."
         case .malformedKey:

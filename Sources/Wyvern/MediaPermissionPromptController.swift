@@ -47,7 +47,15 @@ final class MediaPermissionPromptController: NSWindowController {
         let originLabel = NSTextField(labelWithString: origin)
         originLabel.font = Theme.mono(size: 12)
         originLabel.textColor = Theme.text
-        originLabel.lineBreakMode = .byTruncatingMiddle
+        // Cut the tail. Middle truncation can hide the real host between a familiar prefix and suffix.
+        // The tooltip and accessibility value keep the full origin when the label does not fit.
+        originLabel.lineBreakMode = .byTruncatingTail
+        originLabel.maximumNumberOfLines = 1
+        originLabel.cell?.wraps = false
+        originLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        originLabel.toolTip = origin
+        originLabel.setAccessibilityValue(origin)
+        originLabel.setAccessibilityLabel(origin)
 
         let note = NSTextField(wrappingLabelWithString: "\(AppInfo.displayName) asks before a site can use this device. macOS may ask as well the first time.")
         note.font = Theme.font(size: 12)

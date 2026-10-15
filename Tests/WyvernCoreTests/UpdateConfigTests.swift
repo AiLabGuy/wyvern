@@ -23,6 +23,47 @@ final class UpdateConfigTests: XCTestCase {
         XCTAssertEqual(result.map(\.scheme), .success("https"))
     }
 
+    func testLoopbackAndLinkLocalSourcesRejected() {
+        let samples = [
+            "https://127.0.0.1/latest.json",
+            "https://127.0.0.2/latest.json",
+            "https://[::1]/latest.json",
+            "https://localhost/latest.json",
+            "https://169.254.169.254/latest.json",
+            "https://0177.0.0.1/latest.json",
+            "https://2130706433/latest.json",
+            "https://0x7f000001/latest.json"
+        ]
+        for sample in samples {
+            switch UpdateTransportPolicy.parseSourceURL(sample, allowsDevHTTP: false) {
+            case .failure(let error):
+                XCTAssertEqual(error, .restrictedHost, sample)
+            case .success:
+                XCTFail("accepted \(sample)")
+            }
+        }
+        switch UpdateTransportPolicy.parseSourceURL("https://192.168.1.5/latest.json", allowsDevHTTP: false) {
+        case .success(let url):
+            XCTAssertEqual(url.host, "192.168.1.5")
+        case .failure(let error):
+            XCTFail("\(error)")
+        }
+    }
+
+    func testAssetURLCannotLeaveTheSourceHostForAPrivateTarget() {
+        let feed = URL(string: "https://updates.example.invalid/wyvern/latest.json")!
+        let zip = "WyvernBrowser-0.2.0-b7.zip"
+        func host(of url: String, feedURL: URL) -> Result<String?, UpdateSourceError> {
+            UpdateTransportPolicy.checkAssetURL(URL(string: url)!, feedURL: feedURL, allowsDevHTTP: false).map(\.host)
+        }
+        XCTAssertEqual(host(of: "https://cdn.example.invalid/\(zip)", feedURL: feed), .success("cdn.example.invalid"))
+        XCTAssertEqual(host(of: "https://127.0.0.1/\(zip)", feedURL: feed), .failure(.restrictedHost))
+        XCTAssertEqual(host(of: "https://10.1.2.3/\(zip)", feedURL: feed), .failure(.restrictedHost))
+        let lanFeed = URL(string: "https://10.1.2.3/latest.json")!
+        XCTAssertEqual(host(of: "https://10.1.2.3/\(zip)", feedURL: lanFeed), .success("10.1.2.3"))
+        XCTAssertEqual(host(of: "https://10.9.9.9/\(zip)", feedURL: lanFeed), .failure(.restrictedHost))
+    }
+
     func testOlderAndEqualVersionsAreNotNewer() {
         XCTAssertTrue(UpdateVersion.isNewer(remoteVersion: "0.2.0", remoteBuild: "1", localVersion: "0.1.0", localBuild: "9"))
         XCTAssertTrue(UpdateVersion.isNewer(remoteVersion: "0.1.0", remoteBuild: "3", localVersion: "0.1.0", localBuild: "2"))

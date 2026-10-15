@@ -35,6 +35,20 @@ final class SitePermissionTests: XCTestCase {
         XCTAssertNil(reloaded.storedChoice(origin: "https://example.com", kind: .popups))
     }
 
+    func testPopupBurstStopsAfterFour() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var recent: [Date] = []
+        var allowed = 0
+        for index in 0..<6 {
+            let decision = PopupFloodPolicy.admit(recent: recent, now: start.addingTimeInterval(Double(index) * 0.1))
+            recent = decision.retained
+            if decision.allow { allowed += 1 }
+        }
+        XCTAssertEqual(allowed, 4)
+        let later = PopupFloodPolicy.admit(recent: recent, now: start.addingTimeInterval(3))
+        XCTAssertTrue(later.allow)
+    }
+
     func testLocationAskStaysDistinctFromTheDeniedDefault() {
         let store = SitePermissionStore(directory: directory)
         XCTAssertNil(store.storedChoice(origin: "https://example.com", kind: .location))

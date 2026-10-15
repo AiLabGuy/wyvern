@@ -28,6 +28,24 @@ enum IconGlyph: Equatable {
     case terminal
     case pencil
     case trash
+    /// Block list. On, and the toolbar count when blocking is active.
+    case shield
+    /// Two columns. Toolbar Split View and the two-pane tab mark.
+    case split2
+    /// Three columns.
+    case split3
+    /// Two-by-two grid.
+    case splitGrid
+    /// Make Main Tab. Four corners opening outward.
+    case expand
+    /// Block list off, or a list row that is switched off.
+    case shieldSlash
+    /// Blocking paused on this site.
+    case pause
+    /// A list that failed to update.
+    case warning
+    /// DevTools pane pill. Four arrows, one toward each edge.
+    case move
 }
 
 enum IconDrawing {
@@ -264,7 +282,95 @@ enum IconDrawing {
             path.line(to: p(10.9, 13.2))
             path.line(to: p(11.6, 4.5))
             paint(path)
+        case .shield:
+            paint(Self.shieldPath(p))
+        case .shieldSlash:
+            paint(Self.shieldPath(p))
+            let slash = NSBezierPath()
+            slash.move(to: p(3.4, 12.6))
+            slash.line(to: p(12.6, 3.4))
+            paint(slash)
+        case .pause:
+            let path = NSBezierPath()
+            path.move(to: p(6, 3.2))
+            path.line(to: p(6, 12.8))
+            path.move(to: p(10, 3.2))
+            path.line(to: p(10, 12.8))
+            paint(path)
+        case .split2:
+            paint(NSBezierPath(roundedRect: svgRect(2, 3, 5, 10), xRadius: 1 * scale, yRadius: 1 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(9, 3, 5, 10), xRadius: 1 * scale, yRadius: 1 * scale))
+        case .split3:
+            paint(NSBezierPath(roundedRect: svgRect(1.5, 3, 3.4, 10), xRadius: 0.8 * scale, yRadius: 0.8 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(6.3, 3, 3.4, 10), xRadius: 0.8 * scale, yRadius: 0.8 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(11.1, 3, 3.4, 10), xRadius: 0.8 * scale, yRadius: 0.8 * scale))
+        case .splitGrid:
+            paint(NSBezierPath(roundedRect: svgRect(2, 2, 5, 5), xRadius: 1 * scale, yRadius: 1 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(9, 2, 5, 5), xRadius: 1 * scale, yRadius: 1 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(2, 9, 5, 5), xRadius: 1 * scale, yRadius: 1 * scale))
+            paint(NSBezierPath(roundedRect: svgRect(9, 9, 5, 5), xRadius: 1 * scale, yRadius: 1 * scale))
+        case .expand:
+            let path = NSBezierPath()
+            path.move(to: p(6, 3))
+            path.line(to: p(3, 3))
+            path.line(to: p(3, 6))
+            path.move(to: p(10, 3))
+            path.line(to: p(13, 3))
+            path.line(to: p(13, 6))
+            path.move(to: p(3, 10))
+            path.line(to: p(3, 13))
+            path.line(to: p(6, 13))
+            path.move(to: p(13, 10))
+            path.line(to: p(13, 13))
+            path.line(to: p(10, 13))
+            paint(path)
+        case .warning:
+            let path = NSBezierPath()
+            path.move(to: p(8, 1.6))
+            path.line(to: p(14.4, 13.6))
+            path.line(to: p(1.6, 13.6))
+            path.close()
+            path.move(to: p(8, 6))
+            path.line(to: p(8, 9.4))
+            paint(path)
+            color.setFill()
+            NSBezierPath(ovalIn: svgRect(7.25, 11, 1.5, 1.5)).fill()
+        case .move:
+            let path = NSBezierPath()
+            path.move(to: p(8, 2))
+            path.line(to: p(8, 6))
+            path.move(to: p(6.4, 3.5))
+            path.line(to: p(8, 2))
+            path.line(to: p(9.6, 3.5))
+            path.move(to: p(8, 14))
+            path.line(to: p(8, 10))
+            path.move(to: p(6.4, 12.5))
+            path.line(to: p(8, 14))
+            path.line(to: p(9.6, 12.5))
+            path.move(to: p(2, 8))
+            path.line(to: p(6, 8))
+            path.move(to: p(3.5, 6.4))
+            path.line(to: p(2, 8))
+            path.line(to: p(3.5, 9.6))
+            path.move(to: p(14, 8))
+            path.line(to: p(10, 8))
+            path.move(to: p(12.5, 6.4))
+            path.line(to: p(14, 8))
+            path.line(to: p(12.5, 9.6))
+            paint(path)
         }
+    }
+
+    private static func shieldPath(_ p: (CGFloat, CGFloat) -> NSPoint) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: p(8, 1.7))
+        path.line(to: p(13.2, 3.6))
+        path.line(to: p(13.2, 8))
+        path.line(to: p(8, 14.3))
+        path.line(to: p(2.8, 8))
+        path.line(to: p(2.8, 3.6))
+        path.close()
+        return path
     }
 }
 
@@ -340,7 +446,7 @@ final class LetterBadgeView: NSView {
 /// Icon button. A borderless `NSButton` that draws its own glyph and fill; tracking, the
 /// mouse-up-inside rule, keyboard activation, and accessibility press are stock `NSButton`.
 @MainActor
-final class ToolButton: NSButton {
+class ToolButton: NSButton {
     var glyph: IconGlyph = .plus {
         didSet { needsDisplay = true }
     }

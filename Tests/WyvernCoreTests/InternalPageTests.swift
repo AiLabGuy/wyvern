@@ -40,4 +40,58 @@ final class InternalPageTests: XCTestCase {
         XCTAssertEqual(AddressFormatting.host(of: "https://encyclopedia.example/wiki/tidal-locking"), "encyclopedia.example")
         XCTAssertEqual(AddressFormatting.host(of: "  not a url  "), "not a url")
     }
+
+    func testUserinfoIsNotTheDisplayedHost() throws {
+        let url = try XCTUnwrap(URL(string: "https://accounts.google.com@evil.example/path"))
+        let parts = AddressFormatting.parts(for: url)
+        XCTAssertEqual(parts.primary, "evil.example")
+        XCTAssertEqual(parts.secondary, "/path")
+        XCTAssertFalse(parts.primary.contains("@"))
+        XCTAssertFalse(parts.secondary.contains("@"))
+    }
+
+    func testPathDirectionalOverrideIsStripped() throws {
+        let url = try XCTUnwrap(URL(string: "https://evil.example/%E2%80%AEmoc.knab"))
+        let parts = AddressFormatting.parts(for: url)
+        XCTAssertEqual(parts.primary, "evil.example")
+        XCTAssertFalse(parts.secondary.unicodeScalars.contains { $0.value == 0x202E })
+        XCTAssertFalse(parts.primary.unicodeScalars.contains { $0.value == 0x202E })
+    }
+
+    func testUnicodeHostIsPunycode() {
+        XCTAssertEqual(AddressFormatting.safeHost("аррӏе.com"), "xn--80ak6aa92e.com")
+        XCTAssertEqual(AddressFormatting.safeHost("example.com"), "example.com")
+        XCTAssertFalse(AddressFormatting.safeHost("ev\u{202E}il.com").contains("\u{202E}"))
+    }
+
+    func testProvisionalURLStaysOffTheAddressField() {
+        XCTAssertEqual(
+            AddressCommit.choice(showingTypedTarget: false, loading: true),
+            .keepCommitted
+        )
+        XCTAssertEqual(
+            AddressCommit.choice(showingTypedTarget: true, loading: true),
+            .keepDisplayed
+        )
+        XCTAssertEqual(
+            AddressCommit.choice(showingTypedTarget: false, loading: false),
+            .adoptCandidate
+        )
+    }
+
+    func testLockOnlyForHTTPS() throws {
+        XCTAssertTrue(AddressSecurity.showsLock(URL(string: "https://example.com/a")))
+        XCTAssertFalse(AddressSecurity.showsLock(URL(string: "http://example.com/a")))
+        XCTAssertFalse(AddressSecurity.showsLock(URL(string: "file:///tmp/a.html")))
+        XCTAssertFalse(AddressSecurity.showsLock(URL(string: "blob:https://example.com/id")))
+        XCTAssertFalse(AddressSecurity.showsLock(URL(string: "about:blank")))
+        XCTAssertFalse(AddressSecurity.showsLock(nil))
+    }
+
+    func testVeryLongHostKeepsTheRegistrableEnd() {
+        let padded = String(repeating: "a", count: 60) + ".evil.example"
+        XCTAssertGreaterThan(padded.count, 64)
+        XCTAssertEqual(AddressFormatting.safeHost(padded), "…evil.example")
+        XCTAssertEqual(AddressFormatting.safeHost("encyclopedia.example"), "encyclopedia.example")
+    }
 }

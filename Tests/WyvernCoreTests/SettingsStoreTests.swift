@@ -34,6 +34,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.settings.terminalFontSize, 13)
         XCTAssertEqual(store.settings.schemaVersion, AppSettings.currentSchemaVersion)
         XCTAssertFalse(store.settings.tourSeen)
+        XCTAssertFalse(store.settings.developerToolsEnabled)
     }
 
     func testTerminalDefaultsRoundTripAndFontBounds() {
@@ -119,6 +120,9 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(try decode(#"{"terminalFontSize":30}"#).terminalFontSize, 13)
         XCTAssertEqual(try decode(#"{}"#).schemaVersion, AppSettings.currentSchemaVersion)
         XCTAssertFalse(try decode(#"{}"#).tourSeen)
+        XCTAssertFalse(try decode(#"{}"#).developerToolsEnabled)
+        XCTAssertFalse(try decode(#"{"developerToolsEnabled":false}"#).developerToolsEnabled)
+        XCTAssertTrue(try decode(#"{"developerToolsEnabled":true}"#).developerToolsEnabled)
         XCTAssertFalse(try decode(#"{"tourSeen":false}"#).tourSeen)
         XCTAssertTrue(try decode(#"{"tourSeen":true}"#).tourSeen)
     }
@@ -158,6 +162,26 @@ final class SettingsStoreTests: XCTestCase {
         store.update { $0.hardwareAcceleration = false }
         let reloaded = SettingsStore(defaults: defaults)
         XCTAssertFalse(reloaded.settings.hardwareAcceleration)
+    }
+
+    func testDeveloperToolsDefaultsOffAndPersists() throws {
+        XCTAssertFalse(AppSettings.firstLaunch.developerToolsEnabled)
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertFalse(store.settings.developerToolsEnabled)
+        let missing = try JSONDecoder().decode(AppSettings.self, from: Data(#"{}"#.utf8))
+        XCTAssertFalse(missing.developerToolsEnabled)
+
+        store.update { $0.developerToolsEnabled = true }
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertTrue(reloaded.settings.developerToolsEnabled)
+        let on = try JSONEncoder().encode(reloaded.settings)
+        XCTAssertTrue(String(decoding: on, as: UTF8.self).contains("\"developerToolsEnabled\":true"))
+
+        reloaded.update { $0.developerToolsEnabled = false }
+        let again = SettingsStore(defaults: defaults)
+        XCTAssertFalse(again.settings.developerToolsEnabled)
+        let off = try JSONEncoder().encode(again.settings)
+        XCTAssertTrue(String(decoding: off, as: UTF8.self).contains("\"developerToolsEnabled\":false"))
     }
 
     func testSavedDocumentWithRemovedKeyStillLoads() throws {

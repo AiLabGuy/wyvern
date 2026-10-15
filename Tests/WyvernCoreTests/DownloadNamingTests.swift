@@ -15,6 +15,53 @@ final class DownloadNamingTests: XCTestCase {
         XCTAssertEqual(DownloadNaming.sanitize(""), "download")
         XCTAssertEqual(DownloadNaming.sanitize("   "), "download")
         XCTAssertEqual(DownloadNaming.sanitize("file:name.txt"), "file_name.txt")
+        XCTAssertEqual(DownloadNaming.sanitize("file.command."), "file.command")
+        XCTAssertEqual(DownloadNaming.sanitize("file.command "), "file.command")
+        XCTAssertEqual(DownloadNaming.sanitize("note\u{202E}fdp.txt"), "notefdp.txt")
+        XCTAssertEqual(DownloadNaming.sanitize("a\u{0}b.txt"), "ab.txt")
+        XCTAssertFalse(DownloadNaming.sanitize(String(repeating: "a", count: 300) + ".command").hasSuffix("download"))
+        let capped = DownloadNaming.sanitize(String(repeating: "a", count: 300) + ".command")
+        XCTAssertLessThanOrEqual(capped.utf8.count, 240)
+        XCTAssertTrue(capped.hasSuffix(".command"))
+    }
+
+    func testAutomaticOpenAllowlist() {
+        let allowed = [
+            "notes.pdf", "photo.png", "photo.jpg", "photo.jpeg", "anim.gif", "photo.webp",
+            "photo.heic", "scan.tiff", "notes.txt", "readme.md", "table.csv", "data.json",
+            "song.mp3", "song.m4a", "song.wav", "clip.mp4", "clip.mov", "clip.m4v",
+            "Photo.PNG", "notes.txt.", "notes.txt ",
+        ]
+        for name in allowed {
+            XCTAssertTrue(
+                DownloadOpenPolicy.allowsAutomaticOpen(filename: name, isDirectory: false, isExecutable: false),
+                name
+            )
+        }
+        let refused = [
+            "file.pdf.exe", "file.command.", "profile.mobileconfig", "disk.iso", "page.html",
+            "icon.svg", "archive.zip", "disk.dmg", "script.sh", "payload.webarchive",
+            "setup.pkg", "app.xip", "note", "file.txt.exe", "page.HTML", "doc.docx",
+        ]
+        for name in refused {
+            XCTAssertFalse(
+                DownloadOpenPolicy.allowsAutomaticOpen(filename: name, isDirectory: false, isExecutable: false),
+                name
+            )
+        }
+        XCTAssertFalse(DownloadOpenPolicy.allowsAutomaticOpen(filename: "App.app", isDirectory: true, isExecutable: false))
+        XCTAssertFalse(DownloadOpenPolicy.allowsAutomaticOpen(filename: "tool", isDirectory: false, isExecutable: true))
+        XCTAssertFalse(DownloadOpenPolicy.allowsAutomaticOpen(filename: "notes.pdf", isDirectory: false, isExecutable: true))
+        XCTAssertEqual(DownloadOpenPolicy.allowedExtensions.count, 18)
+    }
+
+    func testDiskFillStopsBeforeTheReserve() {
+        let reserve = DownloadSpacePolicy.minimumFreeBytes
+        XCTAssertFalse(DownloadSpacePolicy.shouldCancel(freeBytes: nil))
+        XCTAssertFalse(DownloadSpacePolicy.shouldCancel(freeBytes: reserve + 10))
+        XCTAssertTrue(DownloadSpacePolicy.shouldCancel(freeBytes: reserve - 1))
+        XCTAssertTrue(DownloadSpacePolicy.shouldCancel(freeBytes: reserve + 100, expectedBytes: 200))
+        XCTAssertFalse(DownloadSpacePolicy.shouldCancel(freeBytes: reserve + 5_000, expectedBytes: 1_000))
     }
 
     func testUniqueNameInsertsNumberBeforeExtension() {

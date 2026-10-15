@@ -101,15 +101,12 @@ public final class MediaPermissionStore {
     }
 
     private func persist() {
-        let manager = FileManager.default
-        let directory = fileURL.deletingLastPathComponent()
         do {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let file = MediaPermissionFile(version: 1, entries: entries)
             let data = try encoder.encode(file)
-            try data.write(to: fileURL, options: [.atomic])
+            try PrivateFile.write(data, to: fileURL)
         } catch {
             return
         }

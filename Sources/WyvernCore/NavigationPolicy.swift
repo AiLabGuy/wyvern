@@ -67,6 +67,78 @@ public enum ResponseDecision: Equatable, Sendable {
     case download
 }
 
+/// External schemes are confirmed, except ones that would hand ssh-style options to another app.
+public enum ExternalLaunchPolicy {
+    private static let shellSchemes: Set<String> = ["ssh", "sftp", "scp", "telnet", "rlogin", "rsh"]
+    private static let bannedFragments = [
+        "proxycommand", "localcommand", "remotecommand", "permitlocalcommand"
+    ]
+
+    public static func allowsConfirmation(_ url: URL) -> Bool {
+        if let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines), host.hasPrefix("-") {
+            return false
+        }
+        if let user = url.user?.trimmingCharacters(in: .whitespacesAndNewlines), user.hasPrefix("-") {
+            return false
+        }
+        let scheme = url.scheme?.lowercased() ?? ""
+        if shellSchemes.contains(scheme) {
+            if url.host?.isEmpty != false { return false }
+            let raw = url.absoluteString.lowercased()
+            let decoded = (url.absoluteString.removingPercentEncoding ?? url.absoluteString).lowercased()
+            if bannedFragments.contains(where: { raw.contains($0) || decoded.contains($0) }) {
+                return false
+            }
+            if shellPiecesLookLikeOptions(url) { return false }
+        }
+        return true
+    }
+
+    /// A shell handler may pass path, query, or userinfo through as argv. A token
+    /// that starts with `-`, or a control character, is an option, not a hostname.
+    private static func shellPiecesLookLikeOptions(_ url: URL) -> Bool {
+        let pieces = [url.user, url.host, url.path, url.query, url.fragment].compactMap { $0 }
+        for piece in pieces {
+            let text = piece.removingPercentEncoding ?? piece
+            if text.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+                return true
+            }
+            let tokens = text.split { character in
+                character == "/" || character == " " || character == "\t" || character == "&" || character == "?"
+            }
+            if tokens.contains(where: { $0.hasPrefix("-") }) { return true }
+        }
+        return false
+    }
+
+    /// Text for the confirm sheet. Directional overrides cannot hide the scheme.
+    public static func promptText(for url: URL, maxLength: Int = 180) -> String {
+        let cleaned = DirectionalText.strippingControls(url.absoluteString)
+        guard cleaned.count > maxLength else { return cleaned }
+        return String(cleaned.prefix(maxLength)) + "…"
+    }
+
+    /// Inspector links open only ordinary web URLs, and only those.
+    public static func canOpenFromInspector(_ url: URL) -> Bool {
+        let scheme = url.scheme?.lowercased()
+        return scheme == "http" || scheme == "https"
+    }
+}
+
+/// Limits confirm sheets a page can raise by navigating to external schemes.
+public enum ExternalPromptGate {
+    public static let maxPerWindow = 3
+    public static let windowSeconds: TimeInterval = 10
+
+    public static func allow(recent: [Date], now: Date) -> (allow: Bool, retained: [Date]) {
+        let kept = recent.filter { now.timeIntervalSince($0) < windowSeconds }
+        if kept.count >= maxPerWindow {
+            return (false, kept)
+        }
+        return (true, kept + [now])
+    }
+}
+
 public enum NavigationPolicy {
     public static func decide(_ request: NavigationRequest) -> NavigationDecision {
         guard let scheme = request.url.scheme?.lowercased(), !scheme.isEmpty else {
@@ -85,7 +157,7 @@ public enum NavigationPolicy {
             // A page cannot start a terminal command. There is no run URL handler.
             return .cancel
         default:
-            return .confirmExternal
+            return ExternalLaunchPolicy.allowsConfirmation(request.url) ? .confirmExternal : .cancel
         }
     }
 
@@ -118,6 +190,21 @@ public enum NavigationPolicy {
     private static func decideFile(_ request: NavigationRequest) -> NavigationDecision {
         guard let typed = request.userTypedFileURL else {
             return .denyFile
+        }
+        // A website, or an about:blank frame inside one, must not keep the file
+        // grant from a document the person opened earlier in this tab.
+        if let current = request.currentPageURL {
+            let scheme = current.scheme?.lowercased() ?? ""
+            if scheme == "file" {
+                let currentIsOpen = sameFile(current, typed) || isWithinDirectory(of: typed, candidate: current)
+                if !currentIsOpen {
+                    return .denyFile
+                }
+            } else if scheme != "about" && !scheme.isEmpty {
+                return .denyFile
+            } else if !sameFile(request.url, typed) {
+                return .denyFile
+            }
         }
         if sameFile(request.url, typed) {
             return .allow

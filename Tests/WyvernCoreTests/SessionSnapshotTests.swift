@@ -57,6 +57,32 @@ final class SessionSnapshotTests: XCTestCase {
         let window = try JSONDecoder().decode(SessionWindowSnapshot.self, from: Data("{}".utf8))
         XCTAssertEqual(window.tabs, [])
         XCTAssertEqual(window.selectedIndex, 0)
+        XCTAssertNil(window.tile)
+    }
+
+    func testOldSnapshotWithoutTileDecodes() throws {
+        let json = """
+        {"windows":[{"tabs":[{"kind":"web","url":"https://example.com/a"},{"kind":"terminal","terminalBookmarkID":"11111111-2222-3333-4444-555555555555"},{"kind":"web"}],"selectedIndex":1}]}
+        """
+        let decoded = try JSONDecoder().decode(SessionSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.windows.count, 1)
+        XCTAssertEqual(decoded.windows[0].tabs.count, 3)
+        XCTAssertEqual(decoded.windows[0].selectedIndex, 1)
+        XCTAssertNil(decoded.windows[0].tile)
+        XCTAssertEqual(decoded.windows[0].tabs[0].url, "https://example.com/a")
+        XCTAssertEqual(decoded.windows[0].tabs[1].kind, .terminal)
+        XCTAssertNil(decoded.windows[0].tabs[2].url)
+    }
+
+    func testCorruptTileDoesNotDropTheWindow() throws {
+        let json = """
+        {"tabs":[{"kind":"web","url":"https://example.com"}],"selectedIndex":0,"tile":"nope"}
+        """
+        let decoded = try JSONDecoder().decode(SessionWindowSnapshot.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.tabs.count, 1)
+        XCTAssertEqual(decoded.selectedIndex, 0)
+        XCTAssertNil(decoded.tile)
+        XCTAssertEqual(decoded.tabs[0].url, "https://example.com")
     }
 
     func testMissingCleanExitCountsAsClean() {
@@ -149,6 +175,31 @@ final class SessionSnapshotTests: XCTestCase {
             SessionStartup.choice(offerCrashRestore: false, startupPage: .customURL, startupURL: "   "),
             .newTab
         )
+    }
+
+    func testRestoreDropsScriptAndNonHTMLFiles() {
+        XCTAssertEqual(
+            SessionRestorePolicy.webLoad(for: "https://example.com/a"),
+            .web(URL(string: "https://example.com/a")!)
+        )
+        XCTAssertEqual(SessionRestorePolicy.webLoad(for: "javascript:alert(1)"), .newTab)
+        XCTAssertEqual(SessionRestorePolicy.webLoad(for: "data:text/html,hi"), .newTab)
+        XCTAssertEqual(SessionRestorePolicy.webLoad(for: "file:///tmp/notes.txt"), .newTab)
+        XCTAssertEqual(
+            SessionRestorePolicy.webLoad(for: "file:///tmp/page.html"),
+            .localDocument(URL(string: "file:///tmp/page.html")!)
+        )
+        XCTAssertEqual(SessionRestorePolicy.webLoad(for: nil), .newTab)
+        let huge = Data(repeating: UInt8(ascii: "{"), count: 64)
+        XCTAssertNil(SessionRestorePolicy.decodeSnapshot(huge, maxBytes: 32))
+        let small = Data("{\"windows\":[]}".utf8)
+        XCTAssertEqual(SessionRestorePolicy.decodeSnapshot(small, maxBytes: 32)?.windows.count, 0)
+    }
+
+    func testOversizedSnapshotFileIsNotRead() throws {
+        let archive = SessionArchive(directory: directory)
+        try Data(repeating: UInt8(ascii: "x"), count: 64).write(to: archive.liveURL)
+        XCTAssertNil(SessionArchive.loadSnapshot(at: archive.liveURL, maxBytes: 16))
     }
 
     func testMarkCleanExitAfterBeginRun() {

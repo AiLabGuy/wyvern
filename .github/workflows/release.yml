@@ -63,6 +63,8 @@ jobs:
           bash scripts/build-app.sh
           bash scripts/make-dmg.sh
           test -f "$DMG"
+          git archive --format=tar.gz --prefix="wyvern-${VERSION}/" -o "build/wyvern-${VERSION}-source.tar.gz" "$GITHUB_SHA"
+          (cd build && shasum -a 256 "wyvern-${VERSION}-source.tar.gz" > "wyvern-${VERSION}-source.tar.gz.sha256")
       - name: Sign and package update
         if: env.SIGNED == 'true'
         env:
@@ -97,9 +99,10 @@ jobs:
             echo
             echo "1. Download \`${dmg_name}\` below and open it."
             echo "2. Drag **${APP_BUNDLE}** onto the Applications folder."
-            echo "3. First launch: this build is not signed with an Apple Developer ID or notarized, so macOS"
-            echo "   Gatekeeper blocks a normal double-click. Either right-click (Control-click) the app in"
-            echo "   Applications and choose **Open**, then **Open** again, or run:"
+            echo "3. First launch: this build is not signed with an Apple Developer ID and is not notarized, so"
+            echo "   macOS Gatekeeper warns. On macOS 15 and later: try to open it once, dismiss the warning, then"
+            echo "   System Settings > Privacy & Security > Open Anyway. On macOS 13 and 14: Control-click the app >"
+            echo "   Open > Open. On any version you can instead run:"
             echo
             echo '   ```bash'
             echo "   xattr -dr com.apple.quarantine \"/Applications/${APP_BUNDLE}\""
@@ -120,7 +123,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=("$DMG" "${DMG}.sha256")
+          assets=("$DMG" "${DMG}.sha256" "build/wyvern-${VERSION}-source.tar.gz" "build/wyvern-${VERSION}-source.tar.gz.sha256")
           if [[ "$SIGNED" == "true" ]]; then
             assets+=("$ZIP" build/latest.json)
           fi

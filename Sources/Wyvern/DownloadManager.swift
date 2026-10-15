@@ -148,7 +148,13 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
                     return
                 }
                 let name = chosen.lastPathComponent
-                if name.isEmpty || name == "." || name == "/" {
+                if name.isEmpty || name == "." || name == ".." || name == "/"
+                    || name.contains("/") || name.contains("\\") {
+                    completionHandler(nil)
+                    return
+                }
+                let folder = chosen.deletingLastPathComponent()
+                if DownloadSpacePolicy.shouldCancel(freeBytes: Self.availableBytes(at: folder)) {
                     completionHandler(nil)
                     return
                 }
@@ -170,6 +176,10 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
             completionHandler(nil)
             return
         }
+        if DownloadSpacePolicy.shouldCancel(freeBytes: Self.availableBytes(at: folder)) {
+            completionHandler(nil)
+            return
+        }
         let occupied = listedNames(in: folder).union(occupiedExtras)
         let names = DownloadNaming.allocate(desired: suggestedFilename, occupied: occupied)
         commitPlacement(
@@ -182,19 +192,30 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
         )
     }
 
-    /// "Open after download" never launches code: apps, installers, scripts, and executables stay closed.
+    /// "Open after download" opens only the inert allowlist. Directories, executables, and every other type stay closed.
     static func isSafeToOpenAutomatically(_ url: URL) -> Bool {
-        let blocked: Set<String> = [
-            "app", "command", "tool", "terminal", "sh", "zsh", "bash", "csh", "py", "pl", "rb",
-            "scpt", "applescript", "workflow", "jar", "pkg", "mpkg", "dmg", "action", "prefpane",
-            "webloc", "inetloc", "fileloc", "url", "osax", "plugin", "bundle", "kext", "dylib",
-        ]
-        if blocked.contains(url.pathExtension.lowercased()) { return false }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
             return false
         }
-        return !FileManager.default.isExecutableFile(atPath: url.path)
+        let executable = FileManager.default.isExecutableFile(atPath: url.path)
+        return DownloadOpenPolicy.allowsAutomaticOpen(
+            filename: url.lastPathComponent,
+            isDirectory: false,
+            isExecutable: executable
+        )
+    }
+
+    private static func availableBytes(at folder: URL) -> Int64? {
+        let keys: Set<URLResourceKey> = [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey]
+        guard let values = try? folder.resourceValues(forKeys: keys) else { return nil }
+        if let important = values.volumeAvailableCapacityForImportantUsage {
+            return Int64(important)
+        }
+        if let available = values.volumeAvailableCapacity {
+            return Int64(available)
+        }
+        return nil
     }
 
     private func askWhereToSave(suggestedFilename: String, directory: URL, completion: @escaping (URL?) -> Void) {
@@ -312,8 +333,8 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
         } else {
             record.received = record.total
         }
-        applyQuarantine(to: destination)
-        if behavior().openWhenFinished, FileManager.default.fileExists(atPath: destination.path),
+        let quarantined = applyQuarantine(to: destination)
+        if quarantined, behavior().openWhenFinished, FileManager.default.fileExists(atPath: destination.path),
            Self.isSafeToOpenAutomatically(destination) {
             NSWorkspace.shared.open(destination)
         }
@@ -338,7 +359,7 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
     }
 
     private func observe(_ record: DownloadRecord, download: WKDownload) {
-        record.progressObservation = download.progress.observe(\.completedUnitCount, options: [.new, .initial]) { [weak record] progress, _ in
+        record.progressObservation = download.progress.observe(\.completedUnitCount, options: [.new, .initial]) { [weak self, weak record] progress, _ in
             let received = progress.completedUnitCount
             let total = progress.totalUnitCount
             DispatchQueue.main.async {
@@ -348,10 +369,21 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
                     if total > 0 {
                         record.total = total
                     }
+                    self?.stopIfDiskLow(record, expected: total)
                     NotificationCenter.default.post(name: .wyvernDownloadsDidChange, object: nil)
                 }
             }
         }
+    }
+
+    private func stopIfDiskLow(_ record: DownloadRecord, expected: Int64) {
+        guard record.state == .active else { return }
+        let folder = record.finalURL?.deletingLastPathComponent() ?? behavior().directory
+        let expectedBytes = expected > 0 ? expected : nil
+        guard DownloadSpacePolicy.shouldCancel(freeBytes: Self.availableBytes(at: folder), expectedBytes: expectedBytes) else {
+            return
+        }
+        record.download?.cancel()
     }
 
     private func listedNames(in folder: URL) -> Set<String> {
@@ -373,14 +405,16 @@ final class DownloadManager: NSObject, WKDownloadDelegate, @unchecked Sendable {
         record.finalURL = nil
     }
 
-    private func applyQuarantine(to url: URL) {
+    @discardableResult
+    private func applyQuarantine(to url: URL) -> Bool {
         let value = QuarantineAttribute.value(
             unixTime: UInt64(Date().timeIntervalSince1970),
             uuid: UUID()
         )
-        _ = value.withCString { pointer in
+        let wrote = value.withCString { pointer in
             setxattr(url.path, QuarantineAttribute.name, pointer, value.utf8.count, 0, 0)
         }
+        return wrote == 0
     }
 
     private func notify(pulse: Bool, reveal: Bool) {

@@ -52,25 +52,70 @@ public enum BrowserFamilyBookmarkParser {
         return .folder(title: title.isEmpty ? fallback : title, children: convert(node.children ?? [], depth: depth))
     }
 
+    /// Nodes visited before the walk stops. A 10 MB file of nested folders stays under this.
+    private static let maxNodes = 500_000
+
+    /// Iterative so a deep tree cannot overflow the stack. Folders past `maxFolderDepth`
+    /// are flattened and their bookmarks are kept, matching the HTML importer.
     private static func convert(_ nodes: [Node], depth: Int) -> [ImportedNode] {
-        var result: [ImportedNode] = []
-        for node in nodes {
+        struct Level {
+            var nodes: [Node]
+            var next: Int
+            var depth: Int
+            var built: [ImportedNode]
+            var title: String
+            var isRoot: Bool
+        }
+        var stack: [Level] = [Level(nodes: nodes, next: 0, depth: depth, built: [], title: "", isRoot: true)]
+        var steps = 0
+        while let current = stack.last {
+            if current.next >= current.nodes.count {
+                let done = stack.removeLast()
+                if done.isRoot {
+                    return done.built
+                }
+                guard var parent = stack.popLast() else { return done.built }
+                if parent.depth >= BookmarkImport.maxFolderDepth {
+                    parent.built.append(contentsOf: done.built)
+                } else {
+                    let title = done.title.isEmpty ? "Folder" : done.title
+                    parent.built.append(.folder(title: title, children: done.built))
+                }
+                stack.append(parent)
+                continue
+            }
+            steps += 1
+            if steps > maxNodes {
+                var collected: [ImportedNode] = []
+                for level in stack {
+                    collected.append(contentsOf: level.built)
+                }
+                return collected
+            }
+            var frame = stack.removeLast()
+            let node = frame.nodes[frame.next]
+            frame.next += 1
             let kind = (node.type ?? "").lowercased()
             if kind == "folder" {
                 let title = BookmarkText.sanitizeTitle(node.name ?? "Folder")
-                let children = convert(node.children ?? [], depth: depth + 1)
-                if depth >= BookmarkImport.maxFolderDepth {
-                    result.append(contentsOf: children)
-                } else {
-                    result.append(.folder(title: title.isEmpty ? "Folder" : title, children: children))
-                }
+                stack.append(frame)
+                stack.append(Level(
+                    nodes: node.children ?? [],
+                    next: 0,
+                    depth: frame.depth + 1,
+                    built: [],
+                    title: title.isEmpty ? "Folder" : title,
+                    isRoot: false
+                ))
             } else if kind == "url" {
                 let title = BookmarkText.sanitizeTitle(node.name ?? "")
-                let url = node.url ?? ""
-                result.append(.bookmark(title: title, url: url, added: parseDate(node.date_added)))
+                frame.built.append(.bookmark(title: title, url: node.url ?? "", added: parseDate(node.date_added)))
+                stack.append(frame)
+            } else {
+                stack.append(frame)
             }
         }
-        return result
+        return []
     }
 
     private static func parseDate(_ raw: String?) -> Date? {

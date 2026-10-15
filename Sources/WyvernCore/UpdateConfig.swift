@@ -49,6 +49,10 @@ public enum UpdateTransportPolicy {
         }
         switch scheme {
         case "https":
+            // A name the user typed may be a LAN host. Loopback and link-local never are.
+            if NetworkHostPolicy.isLoopbackOrLinkLocal(host) {
+                return .failure(.restrictedHost)
+            }
             return .success(url)
         case "http":
             guard isDevUpdaterCompiled, allowsDevHTTP else { return .failure(.httpRejected) }
@@ -66,6 +70,29 @@ public enum UpdateTransportPolicy {
             return .failure(.malformedURL)
         }
         return checkURL(url, allowsDevHTTP: allowsDevHTTP)
+    }
+
+    /// Asset URLs follow the same scheme rules as the source. A private or local host is
+    /// allowed only when it is the source host the user already configured (or dev HTTP).
+    /// A public feed cannot aim the download at loopback, link-local, or another LAN host.
+    public static func checkAssetURL(
+        _ url: URL,
+        feedURL: URL,
+        allowsDevHTTP: Bool
+    ) -> Result<URL, UpdateSourceError> {
+        switch checkURL(url, allowsDevHTTP: allowsDevHTTP) {
+        case .failure(let error):
+            return .failure(error)
+        case .success(let checked):
+            let host = checked.host ?? ""
+            if allowsDevHTTP || !NetworkHostPolicy.isNonPublic(host) {
+                return .success(checked)
+            }
+            if let feedHost = feedURL.host, host.lowercased() == feedHost.lowercased() {
+                return .success(checked)
+            }
+            return .failure(.restrictedHost)
+        }
     }
 }
 

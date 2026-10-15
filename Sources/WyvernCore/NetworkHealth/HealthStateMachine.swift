@@ -78,6 +78,16 @@ public struct HealthStateMachine: Equatable {
         startedAt = nil
     }
 
+    /// Restores a pane's committed state and samples. The next probe continues this history.
+    public mutating func restore(state: HealthState, samples: [HealthSample], at time: Date) {
+        window.restore(samples, now: time)
+        self.state = state
+        pending = state
+        pendingCount = samplesToCommit
+        lastSuccessAt = samples.last(where: { $0.lost == false && $0.rtt != nil })?.timestamp
+        startedAt = samples.map(\.timestamp).min() ?? time
+    }
+
     /// Marks the moment probing started, so silence can elapse before the first sample.
     public mutating func begin(at time: Date? = nil) {
         let time = time ?? clock()

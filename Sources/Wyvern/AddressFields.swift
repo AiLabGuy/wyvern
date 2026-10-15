@@ -323,13 +323,18 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     var onSubmit: ((String) -> Void)?
     var onToggleStar: (() -> Void)?
     private let icon = GlyphView()
+    private let braces = DevToolsBracesView()
     private let star = ToolButton()
     private var pageURL: URL?
+    /// Source URL shown muted and read-only while a DevTools tab is focused.
+    private var showingDevToolsSource = false
     /// Full command while a terminal tab is showing. Nil for a web address.
     private var commandText: String?
     /// Shell and directory shown in the field. The accessibility value stays `commandText`.
     private var commandCaption: String?
     private var editing = false
+    /// True while the user is typing a URL. Pane switches keep that text until Esc or Return.
+    var isEditingURL: Bool { editing }
     /// Return ends editing inside `onSubmit`. That callback must not rewrite `stringValue` before the typed text is submitted.
     private var suppressRestore = false
     private let placeholder = "Search or enter address"
@@ -340,6 +345,9 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         icon.pointSize = MonoMetrics.lockIcon
         icon.tint = Theme.mute
         icon.translatesAutoresizingMaskIntoConstraints = false
+        braces.pointSize = 14
+        braces.isHidden = true
+        braces.translatesAutoresizingMaskIntoConstraints = false
 
         textField.cell = AddressTextFieldCell(textCell: "")
         textField.isBezeled = false
@@ -384,12 +392,17 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
 
         addSubview(textField)
         addSubview(icon)
+        addSubview(braces)
         addSubview(star)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MonoMetrics.urlPadding),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: MonoMetrics.lockIcon),
             icon.heightAnchor.constraint(equalToConstant: MonoMetrics.lockIcon),
+            braces.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            braces.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            braces.widthAnchor.constraint(equalToConstant: 14),
+            braces.heightAnchor.constraint(equalToConstant: 14),
             star.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -MonoMetrics.urlPadding),
             star.centerYAnchor.constraint(equalTo: centerYAnchor),
             star.widthAnchor.constraint(equalToConstant: MonoMetrics.starHit),
@@ -431,6 +444,9 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     func present(url: URL?, bookmarked: Bool, canBookmark: Bool) {
         commandText = nil
         commandCaption = nil
+        showingDevToolsSource = false
+        braces.isHidden = true
+        icon.isHidden = false
         pageURL = url
         textField.isEditable = true
         toolTip = nil
@@ -438,10 +454,43 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         star.tint = bookmarked ? Theme.accent : Theme.mute
         star.isEnabled = canBookmark
         star.setAccessibilityLabel(bookmarked ? "Remove Bookmark" : "Add Bookmark")
-        icon.glyph = url == nil ? .search : .lock
+        // A lock on http, file, or blob would claim a guarantee the page does not have.
+        if url == nil {
+            icon.isHidden = false
+            icon.glyph = .search
+        } else if AddressSecurity.showsLock(url) {
+            icon.isHidden = false
+            icon.glyph = .lock
+        } else {
+            icon.isHidden = true
+        }
         icon.tint = Theme.mute
         guard !editing else { return }
         applyDisplay()
+    }
+
+    /// Source URL while DevTools is focused. Muted, read-only, with the `{}` tile.
+    /// The star still bookmarks that source page.
+    func presentDevTools(url: URL?, bookmarked: Bool, canBookmark: Bool) {
+        editing = false
+        commandText = nil
+        commandCaption = nil
+        showingDevToolsSource = true
+        pageURL = url
+        textField.isEditable = false
+        textField.isSelectable = true
+        icon.isHidden = true
+        braces.isHidden = false
+        star.isEnabled = canBookmark
+        star.tint = bookmarked ? Theme.accent : Theme.mute
+        star.setAccessibilityLabel(bookmarked ? "Remove Bookmark" : "Add Bookmark")
+        let raw = url?.absoluteString ?? ""
+        setIdleFont(Theme.mono(size: 12))
+        setIdleColor(Theme.mute)
+        setIdleString(raw)
+        textField.idleAccessibilityValue = raw.isEmpty ? nil : raw
+        textField.toolTip = raw
+        toolTip = raw
     }
 
     /// Shows a terminal tab. The visible caption is the shell and directory.
@@ -452,20 +501,24 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
 
     func presentCommand(_ command: String, caption: String) {
         editing = false
+        showingDevToolsSource = false
+        braces.isHidden = true
+        icon.isHidden = false
         commandText = command
         commandCaption = caption
         pageURL = nil
         textField.isEditable = false
         textField.isSelectable = true
+        icon.isHidden = false
         icon.glyph = .terminal
         icon.tint = Theme.termGlyph
         star.isEnabled = false
         star.tint = Theme.mute
         star.setAccessibilityLabel("Add Bookmark")
-        textField.font = Theme.mono(size: 12.5)
-        textField.textColor = Theme.text
+        setIdleFont(Theme.mono(size: 12.5))
+        setIdleColor(Theme.text)
         textField.idleAccessibilityValue = command
-        textField.stringValue = caption
+        setIdleString(caption)
         textField.toolTip = command
         toolTip = command
     }
@@ -591,29 +644,55 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     }
 
     private func applyDisplay() {
+        if showingDevToolsSource {
+            presentDevTools(url: pageURL, bookmarked: star.tint == Theme.accent, canBookmark: star.isEnabled)
+            return
+        }
         if let command = commandText {
-            textField.font = Theme.mono(size: 12.5)
-            textField.textColor = Theme.text
+            setIdleFont(Theme.mono(size: 12.5))
+            setIdleColor(Theme.text)
             textField.idleAccessibilityValue = command
-            textField.stringValue = commandCaption ?? command
+            setIdleString(commandCaption ?? command)
             textField.toolTip = command
             toolTip = command
+            icon.isHidden = false
             icon.glyph = .terminal
             icon.tint = Theme.termGlyph
             return
         }
         if let url = pageURL {
             let font = Theme.mono(size: 12)
-            textField.font = font
-            textField.textColor = Theme.text
+            setIdleFont(font)
+            setIdleColor(Theme.text)
             textField.idleAccessibilityValue = url.absoluteString
-            textField.attributedStringValue = Self.attributed(url, font: font)
+            setIdleAttributed(Self.attributed(url, font: font))
         } else {
-            textField.font = Theme.font(size: 13)
-            textField.textColor = Theme.text
+            setIdleFont(Theme.font(size: 13))
+            setIdleColor(Theme.text)
             textField.idleAccessibilityValue = nil
-            textField.stringValue = ""
+            setIdleString("")
         }
+    }
+
+    /// Assigning the same string still dirties the field and flashes the address text.
+    private func setIdleString(_ value: String) {
+        guard textField.stringValue != value else { return }
+        textField.stringValue = value
+    }
+
+    private func setIdleAttributed(_ value: NSAttributedString) {
+        guard textField.attributedStringValue.isEqual(value) == false else { return }
+        textField.attributedStringValue = value
+    }
+
+    private func setIdleFont(_ font: NSFont) {
+        guard textField.font?.isEqual(font) != true else { return }
+        textField.font = font
+    }
+
+    private func setIdleColor(_ color: NSColor) {
+        guard textField.textColor?.isEqual(color) != true else { return }
+        textField.textColor = color
     }
 
     private static func attributed(_ url: URL, font: NSFont) -> NSAttributedString {
