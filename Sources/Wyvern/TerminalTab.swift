@@ -6,6 +6,28 @@ import AppKit
 import Darwin
 import SwiftTerm
 
+/// SwiftTerm's default command-click handler opens the link with `NSWorkspace`.
+/// A subclass replaces that with http and https only. `LocalProcessTerminalView` is open
+/// so this can implement the delegate method the superclass leaves to the protocol default.
+final class WyvernTerminalView: LocalProcessTerminalView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    /// Called from the view's mouse handler. Do not touch view state here.
+    nonisolated func requestOpenLink(source: TerminalView, link: String, params: [String: String]) {
+        let raw = link
+        Task { @MainActor in
+            guard TerminalLinkPolicy.allows(raw), let url = URL(string: raw) else { return }
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
 /// A terminal tab. The header string is the command the user stored. Shell titles are ignored.
 @MainActor
 final class TerminalTab: LocalProcessTerminalViewDelegate {
@@ -38,7 +60,7 @@ final class TerminalTab: LocalProcessTerminalViewDelegate {
         self.shell = shell
         self.workingDirectory = workingDirectory
         self.fieldCaption = fieldCaption.isEmpty ? TerminalLaunch.fieldCaption(shell: shell, directory: "") : fieldCaption
-        let created = LocalProcessTerminalView(frame: .zero)
+        let created = WyvernTerminalView(frame: .zero)
         created.font = Theme.mono(size: 13)
         view = created
     }

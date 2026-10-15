@@ -182,6 +182,41 @@ final class TerminalBookmarkTests: XCTestCase {
         XCTAssertEqual(TerminalLaunch.fieldCaption(shell: "/bin/zsh", directory: "~/proj"), "zsh  ~/proj")
     }
 
+    func testConfirmationNamesShellAndDirectoryWithoutChangingTheHash() throws {
+        let text = TerminalLaunch.confirmationText(
+            command: "echo hi",
+            shell: "/tmp/custom-shell",
+            workingDirectory: "/var/work"
+        )
+        XCTAssertTrue(text.contains("Shell: /tmp/custom-shell"))
+        XCTAssertTrue(text.contains("Working directory: /var/work"))
+        XCTAssertTrue(text.contains("Command: echo hi"))
+        let shellAt = try XCTUnwrap(text.range(of: "Shell:"))
+        let directoryAt = try XCTUnwrap(text.range(of: "Working directory:"))
+        let commandAt = try XCTUnwrap(text.range(of: "Command:"))
+        XCTAssertLessThan(shellAt.lowerBound, directoryAt.lowerBound)
+        XCTAssertLessThan(directoryAt.lowerBound, commandAt.lowerBound)
+
+        let home = TerminalLaunch.confirmationText(command: "echo hi", shell: "/bin/zsh", workingDirectory: nil)
+        XCTAssertEqual(home, "Shell: /bin/zsh\nWorking directory: ~\nCommand: echo hi")
+        let blank = TerminalLaunch.confirmationText(command: "echo hi", shell: "  ", workingDirectory: "  ")
+        XCTAssertTrue(blank.contains("Shell: (login shell)"))
+        XCTAssertTrue(blank.contains("Working directory: ~"))
+
+        let hash = TerminalCommandHash.hex("echo hi")
+        let bookmark = TerminalBookmark(
+            name: "Echo",
+            command: "echo hi",
+            enabled: true,
+            confirmedCommandHash: hash,
+            workingDirectory: "/var/work",
+            shell: "/tmp/custom-shell"
+        )
+        XCTAssertFalse(bookmark.needsConfirmation)
+        XCTAssertTrue(bookmark.canLaunch)
+        XCTAssertEqual(bookmark.confirmedCommandHash, TerminalCommandHash.hex(bookmark.command))
+    }
+
     func testRemoveAndMissingUpdate() throws {
         let directory = try temporaryDirectory()
         let store = TerminalBookmarkStore(directory: directory)

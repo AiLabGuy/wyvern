@@ -15,14 +15,14 @@ private struct CheckResult {
     var passed: Bool
 }
 
-private final class UITestSession {
-    private var process: Process?
-    private var dataDir = ""
-    private var downloadsDir = ""
+final class UITestSession {
+    var process: Process?
+    var dataDir = ""
+    var downloadsDir = ""
     private var fixtureRoot = ""
     private var results: [CheckResult] = []
-    private var client: AXClient?
-    private var appBinary = ""
+    var client: AXClient?
+    var appBinary = ""
 
     func run() -> Int32 {
         requireSession()
@@ -119,6 +119,7 @@ private final class UITestSession {
         runSettingsToggles()
         runTerminalSettings()
         runSetupFlow()
+        runAcceptance(port: port)
         return finish(defaultCode: 1)
     }
 
@@ -1326,7 +1327,7 @@ private final class UITestSession {
     }
 
     /// A check that needed the app frontmost and did not get it fails with "not frontmost".
-    private func record(_ name: String, _ passed: Bool, _ detail: String) {
+    func record(_ name: String, _ passed: Bool, _ detail: String) {
         var passed = passed
         var detail = detail
         if let issue = client?.takeFrontmostIssue() {
@@ -1415,7 +1416,7 @@ private final class UITestSession {
 
     /// Activate, raise the key window, and verify the app is frontmost. A failure is recorded
     /// on the next check as "not frontmost".
-    private func activate() {
+    func activate() {
         guard process != nil else { return }
         client?.ensureFrontmost()
     }
@@ -1423,7 +1424,7 @@ private final class UITestSession {
     /// Re-activate and wait until the app is frontmost and a window is key.
     /// A success drops frontmost failures from the wait so the next check is not failed by them.
     @discardableResult
-    private func waitForKeyWindow(_ ax: AXClient, seconds: Double = 6) -> Bool {
+    func waitForKeyWindow(_ ax: AXClient, seconds: Double = 6) -> Bool {
         let ready = waitUntil(seconds) {
             _ = ax.takeFrontmostIssue()
             guard ax.ensureFrontmost() == nil else { return false }
@@ -1470,7 +1471,7 @@ private final class UITestSession {
         getxattr(path, "com.apple.quarantine", nil, 0, 0, 0) > 0
     }
 
-    private func waitUntil(_ seconds: Double, _ body: () -> Bool) -> Bool {
+    func waitUntil(_ seconds: Double, _ body: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if body() { return true }
@@ -1479,7 +1480,7 @@ private final class UITestSession {
         return body()
     }
 
-    private func pause(_ seconds: Double) {
+    func pause(_ seconds: Double) {
         RunLoop.current.run(until: Date().addingTimeInterval(seconds))
     }
 }

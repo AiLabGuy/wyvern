@@ -773,6 +773,413 @@ final class AXClient {
         guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
         return size
     }
+
+    /// Control, option, shift, and command go down before the key and up after it.
+    /// Menu shortcuts such as ⌃⌘\ and ⌥⌘I are not delivered by flags on the key event alone.
+    func postChord(virtualKey: CGKeyCode, flags: CGEventFlags) -> Bool {
+        ensureFrontmost()
+        let modifiers: [(CGKeyCode, CGEventFlags)] = [
+            (0x3B, .maskControl),
+            (0x3A, .maskAlternate),
+            (0x38, .maskShift),
+            (0x37, .maskCommand)
+        ]
+        let active = modifiers.filter { flags.contains($0.1) }
+        for piece in active {
+            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: piece.0, keyDown: true) else { return false }
+            down.flags = flags
+            down.postToPid(pid)
+            usleep(12_000)
+        }
+        guard let keyDown = CGEvent(keyboardEventSource: nil, virtualKey: virtualKey, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: virtualKey, keyDown: false) else {
+            return false
+        }
+        keyDown.flags = flags
+        keyUp.flags = flags
+        keyDown.postToPid(pid)
+        usleep(12_000)
+        keyUp.postToPid(pid)
+        usleep(12_000)
+        for piece in active.reversed() {
+            guard let up = CGEvent(keyboardEventSource: nil, virtualKey: piece.0, keyDown: false) else { return false }
+            up.flags = []
+            up.postToPid(pid)
+            usleep(12_000)
+        }
+        return true
+    }
+
+    /// Right-button click on `kCGHIDEventTap`, same routing as `click(_:)`.
+    func rightClick(identifier: String) -> Bool {
+        lastTarget = identifier
+        guard let element = find(identifier: identifier) else { return false }
+        lastPoint = nil
+        guard ensureFrontmost(element) == nil else { return false }
+        guard let global = center(element) else { return false }
+        lastPoint = global
+        let source = CGEventSource(stateID: .hidSystemState)
+        guard let moved = CGEvent(
+            mouseEventSource: source,
+            mouseType: .mouseMoved,
+            mouseCursorPosition: global,
+            mouseButton: .right
+        ), let down = CGEvent(
+            mouseEventSource: source,
+            mouseType: .rightMouseDown,
+            mouseCursorPosition: global,
+            mouseButton: .right
+        ), let up = CGEvent(
+            mouseEventSource: source,
+            mouseType: .rightMouseUp,
+            mouseCursorPosition: global,
+            mouseButton: .right
+        ) else {
+            return false
+        }
+        down.setIntegerValueField(.mouseEventClickState, value: 1)
+        up.setIntegerValueField(.mouseEventClickState, value: 1)
+        moved.post(tap: .cghidEventTap)
+        settle(0.05)
+        down.post(tap: .cghidEventTap)
+        settle(0.06)
+        up.post(tap: .cghidEventTap)
+        settle(0.35)
+        return true
+    }
+
+    func dismissMenu() {
+        _ = postKey(virtualKey: 53, flags: [])
+        settle(0.2)
+    }
+
+    /// Nil when the leaf was pressed. Otherwise a short reason, including the missing title.
+    func pressMenu(path: [String]) -> String? {
+        guard let bar = menuBarElement() else { return "menu bar missing" }
+        var node = bar
+        var current: AXUIElement?
+        for (index, component) in path.enumerated() {
+            let items = immediateMenuItems(node)
+            guard let next = items.first(where: { menuTitleMatches(axTitle($0), component) }) else {
+                let walked = path.prefix(index + 1).joined(separator: " > ")
+                return "missing \(walked)"
+            }
+            current = next
+            let isLeaf = index == path.count - 1
+            if !isLeaf {
+                _ = AXUIElementPerformAction(next, kAXPressAction as CFString)
+                settle(0.3)
+                node = next
+            }
+        }
+        guard let current else { return "missing menu" }
+        if isExplicitlyDisabled(current) {
+            return "disabled \(path.joined(separator: " > "))"
+        }
+        let error = AXUIElementPerformAction(current, kAXPressAction as CFString)
+        settle(0.35)
+        if error != .success {
+            return "press failed \(error.rawValue) \(path.joined(separator: " > "))"
+        }
+        return nil
+    }
+
+    /// Titles of the menu at `path`. Intermediate menus are opened so `menuNeedsUpdate` runs.
+    func submenuTitles(path: [String]) -> [String]? {
+        guard let bar = menuBarElement() else { return nil }
+        var node = bar
+        for component in path {
+            let items = immediateMenuItems(node)
+            guard let next = items.first(where: { menuTitleMatches(axTitle($0), component) }) else {
+                return nil
+            }
+            _ = AXUIElementPerformAction(next, kAXPressAction as CFString)
+            settle(0.3)
+            node = next
+        }
+        let titles = immediateMenuItems(node).map { axTitle($0) }.filter { !$0.isEmpty }
+        dismissMenu()
+        return titles.isEmpty ? nil : titles
+    }
+
+    /// Press the first enabled menu item whose title equals `title` or contains it.
+    func pressMenuItem(matching title: String) -> Bool {
+        guard let bar = menuBarElement() else { return false }
+        var match: AXUIElement?
+        func walk(_ element: AXUIElement) {
+            guard match == nil else { return }
+            for item in immediateMenuItems(element) {
+                let name = axTitle(item)
+                if name == title || name.localizedCaseInsensitiveContains(title), !isExplicitlyDisabled(item) {
+                    match = item
+                    return
+                }
+                walk(item)
+                if match != nil { return }
+            }
+        }
+        walk(bar)
+        guard let match else { return false }
+        let error = AXUIElementPerformAction(match, kAXPressAction as CFString)
+        settle(0.35)
+        return error == .success
+    }
+
+    /// The first item of File > New Terminal Tab. Empty string means that item was pressed.
+    func pressFirstTerminalItem() -> String {
+        dismissMenu()
+        guard let bar = menuBarElement() else { return "menu bar missing" }
+        guard let file = immediateMenuItems(bar).first(where: { axTitle($0) == "File" }) else {
+            return "File menu missing"
+        }
+        _ = AXUIElementPerformAction(file, kAXPressAction as CFString)
+        settle(0.35)
+        guard let terminal = immediateMenuItems(file).first(where: { axTitle($0) == "New Terminal Tab" }) else {
+            dismissMenu()
+            return "New Terminal Tab missing"
+        }
+        _ = AXUIElementPerformAction(terminal, kAXPressAction as CFString)
+        var items = immediateMenuItems(terminal).filter { !axTitle($0).isEmpty }
+        var polls = 0
+        while items.isEmpty && polls < 8 {
+            settle(0.25)
+            items = immediateMenuItems(terminal).filter { !axTitle($0).isEmpty }
+            polls += 1
+        }
+        guard let first = items.first else {
+            dismissMenu()
+            return "terminal menu empty"
+        }
+        let title = axTitle(first)
+        if isExplicitlyDisabled(first) {
+            dismissMenu()
+            return "first terminal item unavailable: \(title)"
+        }
+        let error = AXUIElementPerformAction(first, kAXPressAction as CFString)
+        settle(0.4)
+        if error != .success {
+            dismissMenu()
+            return "press failed \(title)"
+        }
+        return ""
+    }
+
+    /// Right-click `identifier` and press a context-menu item with `title`.
+    func pressContextItem(identifier: String, title: String) -> String? {
+        guard rightClick(identifier: identifier) else { return "could not right-click \(identifier)" }
+        let deadline = Date().addingTimeInterval(2.5)
+        var found: AXUIElement?
+        while Date() < deadline && found == nil {
+            breadthFirst(roots: [application], budget: 8000) { element in
+                let role = string(element, kAXRoleAttribute as CFString) ?? ""
+                if role == "AXMenuItem",
+                   axTitle(element) == title,
+                   !isExplicitlyDisabled(element) {
+                    found = element
+                    return false
+                }
+                return true
+            }
+            if found == nil {
+                settle(0.2)
+            }
+        }
+        guard let found else {
+            dismissMenu()
+            return "context item missing \(title)"
+        }
+        let error = AXUIElementPerformAction(found, kAXPressAction as CFString)
+        settle(0.4)
+        if error != .success {
+            dismissMenu()
+            return "context press failed \(title)"
+        }
+        return nil
+    }
+
+    func menuBarHasItem(_ title: String) -> Bool {
+        guard let bar = menuBarElement() else { return false }
+        return immediateMenuItems(bar).contains { axTitle($0) == title }
+    }
+
+    func closeWindow(of identifier: String) -> Bool {
+        guard let element = find(identifier: identifier) else { return false }
+        let window = copyElement(element, kAXWindowAttribute as CFString) ?? element
+        if let button = copyElement(window, kAXCloseButtonAttribute as CFString) {
+            let error = AXUIElementPerformAction(button, kAXPressAction as CFString)
+            if error == .success {
+                settle(0.3)
+                return true
+            }
+        }
+        _ = ensureFrontmost(window)
+        return postCommandKey(virtualKey: 13)
+    }
+
+    func closeOtherWindows() {
+        guard let focused = copyElement(application, kAXFocusedWindowAttribute as CFString) else { return }
+        for window in elements(application, kAXWindowsAttribute as CFString) {
+            if CFEqual(window, focused) { continue }
+            let role = string(window, kAXSubroleAttribute as CFString) ?? ""
+            if role != "AXStandardWindow" && role != "AXDialog" && role != "AXSystemDialog" {
+                continue
+            }
+            if let button = copyElement(window, kAXCloseButtonAttribute as CFString) {
+                _ = AXUIElementPerformAction(button, kAXPressAction as CFString)
+                settle(0.25)
+            }
+        }
+    }
+
+    /// Switch value, when Accessibility exposes it as a string or a number.
+    func switchIsOn(identifier: String) -> Bool? {
+        guard let element = find(identifier: identifier) else { return nil }
+        let text = attributeText(element, kAXValueAttribute as CFString).lowercased()
+        if text == "1" || text == "on" || text == "true" { return true }
+        if text == "0" || text == "off" || text == "false" { return false }
+        return nil
+    }
+
+    func focusedSnapshots(matching include: (String) -> Bool) -> [AXSnapshot] {
+        guard let root = copyElement(application, kAXFocusedWindowAttribute as CFString) else { return [] }
+        return snapshots(in: root, matching: include)
+    }
+
+    func snapshots(matchingIdentifier identifier: String) -> [AXSnapshot] {
+        var found: [AXSnapshot] = []
+        breadthFirst(roots: [application], budget: 8000) { element in
+            if string(element, kAXIdentifierAttribute as CFString) == identifier {
+                found.append(snapshot(element))
+            }
+            return true
+        }
+        return found
+    }
+
+    func focusedIdentifiers(matching include: (String) -> Bool) -> [String] {
+        focusedSnapshots(matching: include).map(\.identifier)
+    }
+
+    /// Value, title, and description of `identifier` and a few descendants.
+    /// A badge often stores the count on a child, not on the identified view.
+    func subtreeText(identifier: String) -> String {
+        guard let root = find(identifier: identifier) else { return "" }
+        var parts: [String] = []
+        breadthFirst(roots: [root], budget: 40) { element in
+            let attributes = [
+                kAXValueAttribute as CFString,
+                kAXTitleAttribute as CFString,
+                kAXDescriptionAttribute as CFString
+            ]
+            for attribute in attributes {
+                let text = attributeText(element, attribute)
+                if !text.isEmpty {
+                    parts.append(text)
+                }
+            }
+            return true
+        }
+        return parts.joined(separator: " ")
+    }
+
+    func identifiers(matching include: (String) -> Bool) -> [String] {
+        var found: [String] = []
+        var seen: Set<String> = []
+        breadthFirst(roots: [application], budget: 8000) { element in
+            if let identifier = string(element, kAXIdentifierAttribute as CFString),
+               include(identifier),
+               seen.insert(identifier).inserted {
+                found.append(identifier)
+            }
+            return true
+        }
+        return found
+    }
+
+    private func snapshots(in root: AXUIElement, matching include: (String) -> Bool) -> [AXSnapshot] {
+        var found: [AXSnapshot] = []
+        breadthFirst(roots: [root], budget: 8000) { element in
+            if let identifier = string(element, kAXIdentifierAttribute as CFString), include(identifier) {
+                found.append(snapshot(element))
+            }
+            return true
+        }
+        return found
+    }
+
+    private func snapshot(_ element: AXUIElement) -> AXSnapshot {
+        AXSnapshot(
+            identifier: string(element, kAXIdentifierAttribute as CFString) ?? "",
+            title: attributeText(element, kAXTitleAttribute as CFString),
+            value: attributeText(element, kAXValueAttribute as CFString),
+            label: attributeText(element, kAXDescriptionAttribute as CFString),
+            enabled: !isExplicitlyDisabled(element)
+        )
+    }
+
+    private func attributeText(_ element: AXUIElement, _ attribute: CFString) -> String {
+        guard let raw = copy(element, attribute) else { return "" }
+        if let text = raw as? String { return text }
+        if let number = raw as? NSNumber { return number.stringValue }
+        return ""
+    }
+
+    private func menuBarElement() -> AXUIElement? {
+        copyElement(application, kAXMenuBarAttribute as CFString)
+    }
+
+    private func axTitle(_ element: AXUIElement) -> String {
+        if let title = string(element, kAXTitleAttribute as CFString), !title.isEmpty {
+            return title
+        }
+        // A menu bar item sometimes leaves its title on the child menu.
+        for child in childElements(element) where string(child, kAXRoleAttribute as CFString) == "AXMenu" {
+            if let title = string(child, kAXTitleAttribute as CFString), !title.isEmpty {
+                return title
+            }
+        }
+        return ""
+    }
+
+    /// "View > Split View" and "View > Tiling" are the same command group.
+    private func menuTitleMatches(_ actual: String, _ wanted: String) -> Bool {
+        if actual == wanted { return true }
+        let splitNames = ["Split View", "Tiling"]
+        return splitNames.contains(actual) && splitNames.contains(wanted)
+    }
+
+    private func isExplicitlyDisabled(_ element: AXUIElement) -> Bool {
+        guard copy(element, kAXEnabledAttribute as CFString) != nil else { return false }
+        return !bool(element, kAXEnabledAttribute as CFString)
+    }
+
+    /// Items directly in this menu. One AXMenu wrapper is flattened; submenus are not.
+    private func immediateMenuItems(_ element: AXUIElement) -> [AXUIElement] {
+        var items: [AXUIElement] = []
+        for child in childElements(element) {
+            let role = string(child, kAXRoleAttribute as CFString) ?? ""
+            if role == "AXMenuBarItem" || role == "AXMenuItem" {
+                items.append(child)
+            } else if role == "AXMenu" {
+                for grandchild in childElements(child) {
+                    let grandchildRole = string(grandchild, kAXRoleAttribute as CFString) ?? ""
+                    if grandchildRole == "AXMenuItem" || grandchildRole == "AXMenuBarItem" {
+                        items.append(grandchild)
+                    }
+                }
+            }
+        }
+        return items
+    }
+}
+
+/// One accessibility element the acceptance checks assert on.
+struct AXSnapshot {
+    var identifier: String
+    var title: String
+    var value: String
+    var label: String
+    var enabled: Bool
 }
 
 

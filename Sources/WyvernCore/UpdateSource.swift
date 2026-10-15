@@ -13,6 +13,8 @@ public enum UpdateSourceError: Error, Equatable, Sendable {
     case httpRejected
     /// `http://` to a host outside the private IPv4 ranges, in a dev build.
     case publicHTTPRejected
+    /// Loopback, link-local, or a private host that is not the update source itself.
+    case restrictedHost
     case missingKey
     case malformedKey
 }

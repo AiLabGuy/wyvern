@@ -81,6 +81,9 @@ public struct AppSettings: Equatable, Sendable {
     public var defaultZoomPercent: Int
     /// False until the guided tour has been shown. A missing value stays false.
     public var tourSeen: Bool
+    /// When true, the Develop menu is shown and ordinary web pages can be inspected.
+    /// A missing value stays false. New tab, bookmarks, settings, and terminal stay closed.
+    public var developerToolsEnabled: Bool
 
     public init(
         schemaVersion: Int = AppSettings.currentSchemaVersion,
@@ -105,7 +108,8 @@ public struct AppSettings: Equatable, Sendable {
         openAfterDownload: Bool = false,
         defaultFontSize: Int = 16,
         defaultZoomPercent: Int = 100,
-        tourSeen: Bool = false
+        tourSeen: Bool = false,
+        developerToolsEnabled: Bool = false
     ) {
         self.schemaVersion = schemaVersion
         self.appearance = appearance
@@ -130,6 +134,7 @@ public struct AppSettings: Equatable, Sendable {
         self.defaultFontSize = defaultFontSize
         self.defaultZoomPercent = defaultZoomPercent
         self.tourSeen = tourSeen
+        self.developerToolsEnabled = developerToolsEnabled
         normalize()
     }
 
@@ -224,6 +229,7 @@ extension AppSettings: Codable {
         case defaultFontSize
         case defaultZoomPercent
         case tourSeen
+        case developerToolsEnabled
     }
 
     // Keyed decoding ignores unknown keys, so a saved document that still contains a launcher key still loads.
@@ -256,6 +262,7 @@ extension AppSettings: Codable {
         defaultFontSize = try container.decodeIfPresent(Int.self, forKey: .defaultFontSize) ?? 16
         defaultZoomPercent = try container.decodeIfPresent(Int.self, forKey: .defaultZoomPercent) ?? 100
         tourSeen = try container.decodeIfPresent(Bool.self, forKey: .tourSeen) ?? false
+        developerToolsEnabled = try container.decodeIfPresent(Bool.self, forKey: .developerToolsEnabled) ?? false
         normalize()
     }
 
@@ -284,11 +291,15 @@ extension AppSettings: Codable {
         try container.encode(defaultFontSize, forKey: .defaultFontSize)
         try container.encode(defaultZoomPercent, forKey: .defaultZoomPercent)
         try container.encode(tourSeen, forKey: .tourSeen)
+        try container.encode(developerToolsEnabled, forKey: .developerToolsEnabled)
     }
 }
 
 public extension Notification.Name {
     static let wyvernSettingsDidChange = Notification.Name("\(AppInfo.bundleIdentifier).settingsDidChange")
+    /// Posted when `developerToolsEnabled` changes. Open web views reapply inspectability.
+    /// `userInfo` carries `DeveloperTools.enabledUserInfoKey`.
+    static let wyvernDeveloperToolsDidChange = Notification.Name("\(AppInfo.bundleIdentifier).developerToolsDidChange")
 }
 
 /// UserDefaults-backed settings. The suite is injectable for tests.
@@ -306,8 +317,16 @@ public final class SettingsStore {
         set {
             var value = newValue
             value.normalize()
+            let developerToolsChanged = load().developerToolsEnabled != value.developerToolsEnabled
             save(value)
             NotificationCenter.default.post(name: .wyvernSettingsDidChange, object: self)
+            if developerToolsChanged {
+                NotificationCenter.default.post(
+                    name: .wyvernDeveloperToolsDidChange,
+                    object: self,
+                    userInfo: DeveloperTools.userInfo(enabled: value.developerToolsEnabled)
+                )
+            }
         }
     }
 

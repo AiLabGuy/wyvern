@@ -46,6 +46,35 @@ public enum MediaPermissionPolicy {
         return "\(scheme)://\(host):\(port)"
     }
 
+    /// Text the permission sheet names. It is the top-level origin of the tab that
+    /// asked, so a frame cannot be the only name on the sheet. A different requesting
+    /// frame is written after that origin. The string is complete; the label truncates
+    /// the tail and keeps this value in the tooltip.
+    public static func sheetOrigin(topLevelURL: URL?, requesterOrigin: String) -> String {
+        let requester = requesterOrigin.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let topLevelURL,
+              let top = SitePermissionPolicy.originKey(for: topLevelURL),
+              !top.isEmpty else {
+            return requester
+        }
+        if requester.isEmpty || requester.lowercased() == top.lowercased() {
+            return top
+        }
+        return "\(top) (requesting frame \(requester))"
+    }
+
+    /// A cross-origin iframe cannot raise the camera or microphone prompt.
+    /// Same-origin frames still can. The main frame is decided on its own origin.
+    public static func allowsFrame(isMainFrame: Bool, requesterOrigin: String, topLevelURL: URL?) -> Bool {
+        if isMainFrame {
+            return true
+        }
+        guard let topLevelURL, let top = SitePermissionPolicy.originKey(for: topLevelURL) else {
+            return false
+        }
+        return requesterOrigin.lowercased() == top.lowercased()
+    }
+
     public static func isEligibleOrigin(_ key: String) -> Bool {
         guard let components = URLComponents(string: key),
               let scheme = components.scheme?.lowercased(),

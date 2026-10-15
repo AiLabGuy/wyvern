@@ -41,7 +41,7 @@ class SettingsRadio: NSButton {
 }
 
 /// S1 panes. Command-1 through Command-4 stay Appearance, General, Updates, and Terminal.
-/// Privacy and Downloads are appended after those four.
+/// Later shortcuts follow sidebar order: Privacy, Block List, Downloads.
 fileprivate enum SettingsPane: Int {
     case appearance = 1
     case general = 2
@@ -49,8 +49,11 @@ fileprivate enum SettingsPane: Int {
     case terminal = 4
     case privacy = 5
     case downloads = 6
+    case blockList = 7
 
-    static let installed: [SettingsPane] = [.appearance, .general, .updates, .terminal, .privacy, .downloads]
+    static let installed: [SettingsPane] = [
+        .appearance, .general, .updates, .terminal, .privacy, .blockList, .downloads
+    ]
 
     var navID: String {
         switch self {
@@ -60,6 +63,7 @@ fileprivate enum SettingsPane: Int {
         case .terminal: return "terminal"
         case .privacy: return "privacy"
         case .downloads: return "downloads"
+        case .blockList: return "blockList"
         }
     }
 
@@ -71,6 +75,7 @@ fileprivate enum SettingsPane: Int {
         case .terminal: return "Terminal"
         case .privacy: return "Privacy"
         case .downloads: return "Downloads"
+        case .blockList: return "Block List"
         }
     }
 
@@ -82,12 +87,13 @@ fileprivate enum SettingsPane: Int {
         case .terminal: return .terminal
         case .privacy: return .lock
         case .downloads: return .download
+        case .blockList: return .shield
         }
     }
 }
 
 /// S1 content metrics. Every pane uses the same top inset and title spacing.
-private enum SettingsLayout {
+enum SettingsLayout {
     static let paddingH: CGFloat = 28
     static let paddingV: CGFloat = 24
     /// Title bar occupies the strip. The 24pt content padding sits below it.
@@ -122,6 +128,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let hideTerminalToggle = SettingsSwitch(label: "Hide terminal tabs")
     private let netHealthToggle = SettingsSwitch(label: "Show network health")
     private let hardwareAccelerationToggle = SettingsSwitch(label: "Hardware acceleration")
+    private let developerToolsToggle = SettingsSwitch(label: "Show Develop menu")
     private let engineTiles: [SettingsEngineTile] = SearchEngine.builtIns.map {
         SettingsEngineTile(engineID: $0.id, name: $0.name)
     } + [SettingsEngineTile(engineID: SearchEngine.customID, name: "Custom")]
@@ -168,6 +175,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let downloadsPathLabel = SettingsLabel(role: .detail, text: "")
     private let chooseDownloadsButton = DepthButton(title: "Choose…", kind: .secondary)
     private let manageSiteDataButton = DepthButton(title: "Manage site data…", kind: .secondary)
+    private let blockListSettings = BlockListSettingsPane()
+    var blockListObserver: NSObjectProtocol?
     private var siteDataSheet: SiteDataSheetController?
     private var bookmarkEditor: TerminalBookmarkEditor?
     private var terminalObserver: NSObjectProtocol?
@@ -250,6 +259,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 self?.reloadTerminalBookmarks()
             }
         }
+        blockListObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernBlockListStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                let rulesChanged = note.userInfo?["rulesChanged"] as? Bool ?? false
+                self?.blockListSettings.reload(rulesChanged: rulesChanged)
+            }
+        }
         show(.appearance)
     }
 
@@ -274,13 +293,25 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         if let terminalObserver {
             NotificationCenter.default.removeObserver(terminalObserver)
         }
+        if let blockListObserver {
+            NotificationCenter.default.removeObserver(blockListObserver)
+        }
     }
 
-    /// 1-based, matching the Window menu tags. Out-of-range numbers do nothing.
+    /// 1-based sidebar index, matching the Window menu tags. Command-1…4 stay the first four panes.
     func selectPane(number: Int) {
-        guard let pane = SettingsPane(rawValue: number), SettingsPane.installed.contains(pane) else { return }
+        let panes = SettingsPane.installed
+        guard number >= 1, number <= panes.count else { return }
+        let pane = panes[number - 1]
         show(pane)
         if let button = navButtons.first(where: { $0.pane == pane }) {
+            window?.makeFirstResponder(button)
+        }
+    }
+
+    func showBlockList() {
+        show(.blockList)
+        if let button = navButtons.first(where: { $0.pane == .blockList }) {
             window?.makeFirstResponder(button)
         }
     }
@@ -376,6 +407,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         paneViews[.updates] = makeScroll(column: updatesColumn())
         paneViews[.terminal] = makeScroll(column: terminalColumn())
         paneViews[.privacy] = makeScroll(column: privacyColumn())
+        paneViews[.blockList] = makeScroll(column: blockListSettings.makeColumn(using: self))
         paneViews[.downloads] = makeScroll(column: downloadsColumn())
     }
 
@@ -441,6 +473,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         hardwareAccelerationToggle.target = self
         hardwareAccelerationToggle.action = #selector(hardwareAccelerationChanged)
         hardwareAccelerationToggle.setAccessibilityIdentifier("wyvern.settings.hardwareAcceleration")
+        developerToolsToggle.target = self
+        developerToolsToggle.action = #selector(developerToolsChanged)
+        developerToolsToggle.setAccessibilityIdentifier("wyvern.settings.showDevelopMenu")
     }
 
     private func configureEngines() {
@@ -582,7 +617,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let subtitle = addSection(
             "General",
             id: "wyvern.settings.section.general",
-            subtitle: "Search, bookmarks, and the default browser.",
+            subtitle: "Search, bookmarks, the default browser, and the Develop menu.",
             to: column
         )
         addGroup("Search", to: column, after: subtitle)
@@ -679,8 +714,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             control: startupURLFrame
         ), in: startup.stack)
         addCard(startup.host, to: column)
-        _ = addNote(
+        let startupNote = addNote(
             "An unclean exit asks before this. An empty custom URL opens a new tab.",
+            to: column
+        )
+        addGroup("Develop", id: "wyvern.settings.section.develop", to: column, after: startupNote)
+        let developer = makeCard(padded: false)
+        span(makeRow(
+            title: "Show Develop menu",
+            detail: "Inspect the focused web page. New tab, bookmarks, settings, and terminal stay closed.",
+            control: developerToolsToggle
+        ), in: developer.stack)
+        addCard(developer.host, to: column)
+        _ = addNote(
+            "Off hides the Develop menu. Web Inspector opens in a DevTools tab. If it cannot dock inside that tab, it stays in its own window tied to the tab. If it cannot open at all, right-click the page and choose Inspect Element.",
             to: column
         )
         return column
@@ -1207,7 +1254,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
     }
 
-    private func makeColumn() -> NSStackView {
+    func makeColumn() -> NSStackView {
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
@@ -1216,7 +1263,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return column
     }
 
-    private func makeScroll(column: NSStackView) -> NSScrollView {
+    func makeScroll(column: NSStackView) -> NSScrollView {
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -1252,7 +1299,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return scroll
     }
 
-    private func addSection(_ title: String, id: String, subtitle: String, to column: NSStackView) -> NSView {
+    func addSection(_ title: String, id: String, subtitle: String, to column: NSStackView) -> NSView {
         let heading = SettingsLabel(role: .section, text: title)
         heading.setAccessibilityIdentifier(id)
         let sub = SettingsLabel(role: .subtitle, text: subtitle)
@@ -1265,7 +1312,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return sub
     }
 
-    private func addGroup(_ title: String, id: String? = nil, to column: NSStackView, after previous: NSView) {
+    func addGroup(_ title: String, id: String? = nil, to column: NSStackView, after previous: NSView) {
         let label = SettingsLabel(role: .group, text: title)
         if let id {
             label.setAccessibilityIdentifier(id)
@@ -1275,20 +1322,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         column.setCustomSpacing(SettingsLayout.groupBottom, after: label)
     }
 
-    private func addCard(_ host: NSView, to column: NSStackView) {
+    func addCard(_ host: NSView, to column: NSStackView) {
         column.addArrangedSubview(host)
         host.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
     }
 
     @discardableResult
-    private func addNote(_ text: String, to column: NSStackView) -> NSView {
+    func addNote(_ text: String, to column: NSStackView) -> NSView {
         let label = SettingsLabel(role: .note, text: text)
         column.addArrangedSubview(label)
         label.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
         return label
     }
 
-    private func makeCard(padded: Bool) -> (host: NSView, stack: NSStackView) {
+    func makeCard(padded: Bool) -> (host: NSView, stack: NSStackView) {
         let host = NSView()
         host.translatesAutoresizingMaskIntoConstraints = false
         let fill = SettingsCardFill()
@@ -1314,7 +1361,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return (host, stack)
     }
 
-    private func makeRow(
+    func makeRow(
         title: String,
         titleID: String? = nil,
         detail: String? = nil,
@@ -1370,7 +1417,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     /// Card stacks align leading, so a row keeps its intrinsic width unless it is pinned.
-    private func span(_ view: NSView, in stack: NSStackView) {
+    func span(_ view: NSView, in stack: NSStackView) {
         stack.addArrangedSubview(view)
         view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
     }
@@ -1399,6 +1446,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
         for button in navButtons {
             button.chosen = button.pane == pane
+        }
+        let blockList = pane == .blockList
+        window?.autorecalculatesKeyViewLoop = blockList == false
+        if blockList, let button = navButtons.first(where: { $0.pane == .blockList }) {
+            blockListSettings.attachKeyLoop(after: button)
+        } else {
+            blockListSettings.detachKeyLoop()
+            window?.recalculateKeyViewLoop()
         }
     }
 
@@ -1708,6 +1763,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         hideTerminalToggle.needsDisplay = true
         netHealthToggle.state = current.netHealthEnabled ? .on : .off
         hardwareAccelerationToggle.state = current.hardwareAcceleration ? .on : .off
+        developerToolsToggle.state = current.developerToolsEnabled ? .on : .off
+        developerToolsToggle.needsDisplay = true
         netHealthToggle.needsDisplay = true
         let selectedID = current.searchEngineID
         for tile in engineTiles {
@@ -1822,6 +1879,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     @objc private func hardwareAccelerationChanged() {
         settings.update { $0.hardwareAcceleration = hardwareAccelerationToggle.state == .on }
+    }
+
+    @objc private func developerToolsChanged() {
+        let enabled = developerToolsToggle.state == .on
+        BrowserTab.developerToolsEnabled = enabled
+        settings.update { $0.developerToolsEnabled = enabled }
     }
 
     @objc private func cookiePolicyChanged() {
@@ -2497,7 +2560,7 @@ final class SettingsHairline: NSView {
 }
 
 @MainActor
-private final class SettingsFieldFrame: NSView {
+final class SettingsFieldFrame: NSView {
     let field = NSTextField(frame: .zero)
 
     override init(frame frameRect: NSRect) {
@@ -2552,7 +2615,7 @@ private final class SettingsFieldFrame: NSView {
 }
 
 @MainActor
-private final class SettingsSwitch: NSSwitch {
+final class SettingsSwitch: NSSwitch {
     init(label: String) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false

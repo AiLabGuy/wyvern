@@ -128,6 +128,80 @@ final class BookmarkImportTests: XCTestCase {
         XCTAssertFalse(sanitized.contains("\u{0007}"))
     }
 
+    func testPlacesCycleAndDepthStop() {
+        let cycle = PlacesDatabase.nodes(from: [
+            PlacesDatabase.PlacesBookmarkRow(id: 1, type: 2, parent: 0, position: 0, title: "root", url: ""),
+            PlacesDatabase.PlacesBookmarkRow(id: 2, type: 2, parent: 1, position: 0, title: "menu", url: ""),
+            PlacesDatabase.PlacesBookmarkRow(id: 4, type: 2, parent: 4, position: 0, title: "orphan loop", url: ""),
+            PlacesDatabase.PlacesBookmarkRow(id: 3, type: 1, parent: 2, position: 1, title: "Page", url: "https://example.com/")
+        ])
+        XCTAssertEqual(bookmarkTitles(cycle), ["Page"])
+
+        var deep: [PlacesDatabase.PlacesBookmarkRow] = [
+            PlacesDatabase.PlacesBookmarkRow(id: 1, type: 2, parent: 0, position: 0, title: "toolbar", url: "")
+        ]
+        var parent: Int64 = 1
+        for index in 2...40 {
+            deep.append(PlacesDatabase.PlacesBookmarkRow(
+                id: Int64(index), type: 2, parent: parent, position: 0, title: "f\(index)", url: ""
+            ))
+            parent = Int64(index)
+        }
+        deep.append(PlacesDatabase.PlacesBookmarkRow(
+            id: 100, type: 1, parent: parent, position: 0, title: "Leaf", url: "https://deep.example/"
+        ))
+        let nodes = PlacesDatabase.nodes(from: deep)
+        func folderDepth(_ nodes: [ImportedNode], depth: Int) -> Int {
+            var maxDepth = depth
+            for node in nodes {
+                if case .folder(_, let children) = node {
+                    maxDepth = max(maxDepth, folderDepth(children, depth: depth + 1))
+                }
+            }
+            return maxDepth
+        }
+        XCTAssertLessThanOrEqual(folderDepth(nodes, depth: 0), BookmarkImport.maxFolderDepth)
+        XCTAssertFalse(bookmarkTitles(nodes).contains("Leaf"))
+    }
+
+    func testPlacesRejectsSymlinkAndOversizeFile() throws {
+        let dir = directory.appendingPathComponent("places-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("places.sqlite")
+        try Data("x".utf8).write(to: file)
+        let link = dir.appendingPathComponent("link.sqlite")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+        XCTAssertThrowsError(try PlacesDatabase.validateRegularFile(link, maxBytes: 100)) { error in
+            XCTAssertEqual(error as? BookmarkImportError, .unreadable)
+        }
+        XCTAssertThrowsError(try PlacesDatabase.validateRegularFile(file, maxBytes: 0)) { error in
+            XCTAssertEqual(error as? BookmarkImportError, .fileTooLarge)
+        }
+        XCTAssertNoThrow(try PlacesDatabase.validateRegularFile(file, maxBytes: 100))
+    }
+
+    func testJSONDeepTreeFlattensWithoutDroppingTheLeaf() throws {
+        var json = "{\"roots\":{\"bookmark_bar\":{\"type\":\"folder\",\"name\":\"Bar\",\"children\":["
+        for _ in 0..<40 {
+            json += "{\"type\":\"folder\",\"name\":\"Nest\",\"children\":["
+        }
+        json += "{\"type\":\"url\",\"name\":\"Leaf\",\"url\":\"https://deep.example/leaf\"}"
+        json += String(repeating: "]}" , count: 40)
+        json += "]}}}"
+        let nodes = try BrowserFamilyBookmarkParser.parse(data: Data(json.utf8))
+        XCTAssertEqual(bookmarkTitles(nodes), ["Leaf"])
+        func folderDepth(_ nodes: [ImportedNode], depth: Int) -> Int {
+            var maxDepth = depth
+            for node in nodes {
+                if case .folder(_, let children) = node {
+                    maxDepth = max(maxDepth, folderDepth(children, depth: depth + 1))
+                }
+            }
+            return maxDepth
+        }
+        XCTAssertLessThanOrEqual(folderDepth(nodes, depth: 0), BookmarkImport.maxFolderDepth)
+    }
+
     func testUnsupportedSchemes() {
         XCTAssertFalse(BookmarkImport.isSupportedURL("javascript:alert(1)"))
         XCTAssertFalse(BookmarkImport.isSupportedURL("data:text/html,x"))

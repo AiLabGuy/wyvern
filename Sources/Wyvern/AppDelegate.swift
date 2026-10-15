@@ -28,6 +28,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private let historyMenu = NSMenu(title: "History")
     private let viewMenu = NSMenu(title: "View")
     private let windowMenu = NSMenu(title: "Window")
+    /// Top-level Develop menu. Hidden while Show Develop menu is off.
+    private var developMenuItem: NSMenuItem?
+    /// Retitled between Show and Hide Web Inspector.
+    var showWebInspectorItem: NSMenuItem?
     private var tabKeyMonitor: Any?
     private var didApplyLaunchWindow = false
     /// URLs from `application(_:open:)` before the first browser window exists.
@@ -59,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         static let location = 5
         static let bookmark = 6
         static let restoreSession = 7
+        static let showBlockedCount = 8
         static let bookmarkSeparator = 900
     }
 
@@ -78,10 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         BrowserTab.hardwareAcceleration = settings.settings.hardwareAcceleration
         BrowserTab.defaultFontSize = settings.settings.defaultFontSize
         BrowserTab.defaultZoomPercent = settings.settings.defaultZoomPercent
+        BrowserTab.developerToolsEnabled = settings.settings.developerToolsEnabled
         BrowserTab.logSoftwareRenderingSupport()
         ProcessInfo.processInfo.disableSuddenTermination()
         CookiePolicyController.shared.apply(settings.settings.cookiePolicy)
         appliedCookiePolicy = settings.settings.cookiePolicy
+        BlockListController.shared.start()
         wireDownloads()
         observeSettings()
         session.beginRun()
@@ -150,11 +157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             setEnabled(MenuTag.location, browser != nil, in: menu)
             setEnabled(MenuTag.bookmark, browser?.canBookmarkCurrent == true, in: menu)
         }
+        if menu === viewMenu, let entry = menu.items.first(where: { $0.tag == MenuTag.showBlockedCount }) {
+            entry.state = BlockListController.shared.showBlockedCount ? .on : .off
+        }
         if menu === bookmarksMenu {
             rebuildBookmarkItems()
         }
         if menu === terminalMenu {
             rebuildTerminalMenu(menu)
+        }
+        if menu === developMenuItem?.submenu {
+            refreshDevelopMenuTitles()
         }
         if menu === windowMenu {
             if NSApp.keyWindow?.windowController is SettingsWindowController {
@@ -233,6 +246,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return NSApp.keyWindow != nil
         case #selector(restorePreviousSessionFromMenu(_:)):
             return session.canRestorePrevious
+        case #selector(showWebInspector(_:)):
+            return focusedBrowserWindow()?.canToggleWebInspector == true
+        case #selector(startElementSelection(_:)), #selector(showJavaScriptConsole(_:)):
+            return focusedBrowserWindow()?.focusedWebInspectorTarget() != nil
         default:
             return true
         }
@@ -299,6 +316,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         settingsController?.window?.makeKeyAndOrderFront(sender)
     }
 
+    func showBlockListSettings(_ sender: Any?) {
+        showSettings(sender)
+        settingsController?.showBlockList()
+    }
+
+    @objc func toggleBlockedCount(_ sender: Any?) {
+        let shown = BlockListController.shared.showBlockedCount == false
+        BlockListController.shared.setShowBlockedCount(shown)
+    }
+
     @objc func checkForUpdates(_ sender: Any?) {
         updater?.start(from: keyBrowser?.window)
     }
@@ -344,6 +371,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         let browser = keyBrowser ?? makeWindow()
         browser.loadInActiveTab(url: url, userTypedFile: url.scheme?.lowercased() == "file")
+    }
+
+    /// DevTools-only window. 900×640, or the last frame stored under `wyvern.devtools.windowFrame`.
+    func presentDevToolsWindow(_ tab: SessionTab) {
+        let controller = installWindow()
+        controller.shouldCascadeWindows = false
+        if let frame = Self.rememberedDevToolsWindowFrame() {
+            controller.window?.setFrame(frame, display: false)
+        } else {
+            controller.window?.setFrame(NSRect(x: 0, y: 0, width: 900, height: 640), display: false)
+            controller.window?.center()
+        }
+        controller.showWindow(nil)
+        controller.adopt(tab: tab, at: 0)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    static let devToolsWindowFrameKey = "wyvern.devtools.windowFrame"
+
+    static func rememberedDevToolsWindowFrame() -> NSRect? {
+        guard let raw = AppLocations.userDefaults.string(forKey: devToolsWindowFrameKey) else { return nil }
+        let parts = raw.split(separator: ",").compactMap { Double($0) }
+        guard parts.count == 4, parts[2] >= 320, parts[3] >= 200 else { return nil }
+        return NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+    }
+
+    static func rememberDevToolsWindowFrame(_ frame: NSRect) {
+        let raw = "\(frame.origin.x),\(frame.origin.y),\(frame.size.width),\(frame.size.height)"
+        AppLocations.userDefaults.set(raw, forKey: devToolsWindowFrameKey)
     }
 
     /// A window for a tab that already exists. No blank tab is added; the caller adopts the live tab.
@@ -484,6 +540,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         return windows.last
     }
 
+    /// Key browser only. Develop commands do not fall back to another window.
+    func focusedBrowserWindow() -> BrowserWindowController? {
+        let key = NSApp.keyWindow
+        if let controller = key?.windowController as? BrowserWindowController {
+            return controller
+        }
+        if let parent = key?.sheetParent?.windowController as? BrowserWindowController {
+            return parent
+        }
+        return nil
+    }
+
+    /// Develop menu actions call this. The tab comes from `focusedWebInspectorTarget()`.
+    func developCommandTarget() -> (tab: BrowserTab, window: NSWindow?)? {
+        guard let browser = focusedBrowserWindow() else { return nil }
+        guard let tab = browser.focusedWebInspectorTarget() else { return nil }
+        return (tab, browser.window)
+    }
+
+    private func updateDevelopMenuVisibility() {
+        developMenuItem?.isHidden = !settings.settings.developerToolsEnabled
+    }
+
     private func buildMainMenu() {
         let main = NSMenu()
         let appItem = NSMenuItem()
@@ -574,12 +653,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         focus.tag = MenuTag.location
         viewMenu.addItem(focus)
         viewMenu.addItem(.separator())
+        let blockedCount = item("Show Blocked Count", action: #selector(toggleBlockedCount(_:)), target: self)
+        blockedCount.tag = MenuTag.showBlockedCount
+        blockedCount.state = BlockListController.shared.showBlockedCount ? .on : .off
+        viewMenu.addItem(blockedCount)
         viewMenu.addItem(item(
             "Enter Full Screen",
             action: #selector(NSWindow.toggleFullScreen(_:)),
             key: "f",
             modifiers: [.command, .control]
         ))
+        viewMenu.addItem(.separator())
+        let splitMenu = NSMenu(title: "Split View")
+        let splitItem = NSMenuItem(title: "Split View", action: nil, keyEquivalent: "")
+        splitItem.submenu = splitMenu
+        viewMenu.addItem(splitItem)
+        appendSplitCommands(to: splitMenu)
+        developMenuItem = installDevelopMenu(on: main)
+        updateDevelopMenuVisibility()
 
         let historyItem = NSMenuItem()
         main.addItem(historyItem)
@@ -760,6 +851,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         entry.target = target
         return entry
+    }
+
+    /// View > Split View. Targets stay nil so the key window validates them.
+    /// The only other Control-Command shortcut in this menu bar is Enter Full Screen (⌃⌘F).
+    /// Control-Option-Command arrows move a focused DevTools tab. The View menu owns those keys.
+    /// While a split is showing, the window gives ⌃⌘\ to Unsplit All and clears it on Split Right.
+    private func appendSplitCommands(to menu: NSMenu) {
+        menu.addItem(item(
+            "Split Right",
+            action: #selector(BrowserWindowController.splitRight(_:)),
+            key: "\\",
+            modifiers: [.command, .control]
+        ))
+        menu.addItem(item(
+            "Split Below",
+            action: #selector(BrowserWindowController.splitDown(_:)),
+            key: "\\",
+            modifiers: [.command, .control, .shift]
+        ))
+        menu.addItem(item(
+            "Close Pane",
+            action: #selector(BrowserWindowController.closePane(_:)),
+            key: "w",
+            modifiers: [.command, .control]
+        ))
+        menu.addItem(.separator())
+        menu.addItem(item(
+            "Unsplit All",
+            action: #selector(BrowserWindowController.unsplit(_:))
+        ))
+        menu.addItem(item(
+            "Equalize",
+            action: #selector(BrowserWindowController.equalizePanes(_:)),
+            key: "=",
+            modifiers: [.command, .control]
+        ))
+        let layoutMenu = NSMenu(title: "Layout")
+        let layoutItem = NSMenuItem(title: "Layout", action: nil, keyEquivalent: "")
+        layoutItem.submenu = layoutMenu
+        menu.addItem(layoutItem)
+        for arrangement in TileArrangement.allCases {
+            let entry = item(
+                Self.layoutTitle(arrangement),
+                action: #selector(BrowserWindowController.applyLayout(_:))
+            )
+            entry.representedObject = arrangement.rawValue
+            layoutMenu.addItem(entry)
+        }
+        let focusMenu = NSMenu(title: "Move Focus")
+        let focusItem = NSMenuItem(title: "Move Focus", action: nil, keyEquivalent: "")
+        focusItem.submenu = focusMenu
+        menu.addItem(focusItem)
+        focusMenu.addItem(item(
+            "Left",
+            action: #selector(BrowserWindowController.focusPaneLeft(_:)),
+            key: "\u{F702}",
+            modifiers: [.command, .control]
+        ))
+        focusMenu.addItem(item(
+            "Right",
+            action: #selector(BrowserWindowController.focusPaneRight(_:)),
+            key: "\u{F703}",
+            modifiers: [.command, .control]
+        ))
+        focusMenu.addItem(item(
+            "Up",
+            action: #selector(BrowserWindowController.focusPaneUp(_:)),
+            key: "\u{F700}",
+            modifiers: [.command, .control]
+        ))
+        focusMenu.addItem(item(
+            "Down",
+            action: #selector(BrowserWindowController.focusPaneDown(_:)),
+            key: "\u{F701}",
+            modifiers: [.command, .control]
+        ))
+        menu.addItem(item(
+            "Swap Left",
+            action: #selector(BrowserWindowController.swapPaneLeft(_:)),
+            key: "\u{F702}",
+            modifiers: [.command, .control, .shift]
+        ))
+        menu.addItem(item(
+            "Swap Right",
+            action: #selector(BrowserWindowController.swapPaneRight(_:)),
+            key: "\u{F703}",
+            modifiers: [.command, .control, .shift]
+        ))
+        menu.addItem(.separator())
+        menu.addItem(item(
+            "Move DevTools Left",
+            action: #selector(BrowserWindowController.moveDevToolsLeft(_:)),
+            key: "\u{F702}",
+            modifiers: [.command, .option, .control]
+        ))
+        menu.addItem(item(
+            "Move DevTools Right",
+            action: #selector(BrowserWindowController.moveDevToolsRight(_:)),
+            key: "\u{F703}",
+            modifiers: [.command, .option, .control]
+        ))
+        menu.addItem(item(
+            "Move DevTools Above",
+            action: #selector(BrowserWindowController.moveDevToolsAbove(_:)),
+            key: "\u{F700}",
+            modifiers: [.command, .option, .control]
+        ))
+        menu.addItem(item(
+            "Move DevTools Below",
+            action: #selector(BrowserWindowController.moveDevToolsBelow(_:)),
+            key: "\u{F701}",
+            modifiers: [.command, .option, .control]
+        ))
+    }
+
+    private static func layoutTitle(_ arrangement: TileArrangement) -> String {
+        switch arrangement {
+        case .twoColumns: return "2 Columns"
+        case .twoRows: return "2 Rows"
+        case .threeColumns: return "3 Columns"
+        case .grid: return "2×2 Grid"
+        case .onePlusTwo: return "1 + 2"
+        }
     }
 
     private func setEnabled(_ tag: Int, _ enabled: Bool, in menu: NSMenu) {
@@ -1010,6 +1224,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         BrowserTab.hardwareAcceleration = current.hardwareAcceleration
         BrowserTab.defaultFontSize = current.defaultFontSize
         BrowserTab.defaultZoomPercent = current.defaultZoomPercent
+        BrowserTab.developerToolsEnabled = current.developerToolsEnabled
+        updateDevelopMenuVisibility()
         if current.cookiePolicy != appliedCookiePolicy {
             appliedCookiePolicy = current.cookiePolicy
             CookiePolicyController.shared.apply(current.cookiePolicy)

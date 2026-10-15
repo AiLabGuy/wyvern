@@ -1,16 +1,18 @@
 # Security
 
-## Reporting
+## Reporting a vulnerability
 
-Report a vulnerability in private to security@placeholder.invalid.
+Please report a vulnerability **privately** through GitHub: open the repository's **Security** tab and choose **Report a vulnerability** (GitHub private vulnerability reporting). Do not open a public issue or pull request for an undisclosed vulnerability.
 
-Do not open a public issue for an undisclosed vulnerability. Include steps to reproduce and the version you ran. You will receive an acknowledgement, and a fix will be prepared before public discussion.
+Include the version you ran (Wyvern Browser > About), your macOS version, and steps to reproduce. This is a small volunteer project: expect an acknowledgement within about a week, and a fix prepared before public discussion where one is possible. There is no bug bounty.
+
+What was reviewed before v0.1.0, how, and what is still known to be weak is in [docs/SECURITY-REPORT.md](docs/SECURITY-REPORT.md).
 
 ## Supported versions
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | yes |
+| 0.1.x | yes (latest release only) |
 | older | no |
 
 Wyvern Browser runs on macOS 13 and later.

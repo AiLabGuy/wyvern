@@ -24,6 +24,83 @@ final class MediaPermissionPolicyTests: XCTestCase {
         )
     }
 
+    func testSheetNamesTheTopLevelOriginInFull() throws {
+        let page = try XCTUnwrap(URL(string: "https://Example.COM/app"))
+        XCTAssertEqual(
+            MediaPermissionPolicy.sheetOrigin(topLevelURL: page, requesterOrigin: "https://example.com"),
+            "https://example.com"
+        )
+        XCTAssertEqual(
+            MediaPermissionPolicy.sheetOrigin(topLevelURL: page, requesterOrigin: "HTTPS://Example.COM"),
+            "https://example.com"
+        )
+        let framed = MediaPermissionPolicy.sheetOrigin(
+            topLevelURL: page,
+            requesterOrigin: "https://ads.example"
+        )
+        XCTAssertTrue(framed.hasPrefix("https://example.com"))
+        XCTAssertTrue(framed.contains("requesting frame https://ads.example"))
+        XCTAssertFalse(framed.contains("…"))
+        let local = try XCTUnwrap(URL(string: "http://127.0.0.1:8080/mic"))
+        XCTAssertEqual(
+            MediaPermissionPolicy.sheetOrigin(topLevelURL: local, requesterOrigin: "http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080"
+        )
+        XCTAssertEqual(
+            MediaPermissionPolicy.sheetOrigin(topLevelURL: nil, requesterOrigin: "https://example.com"),
+            "https://example.com"
+        )
+        let blank = try XCTUnwrap(URL(string: "about:blank"))
+        XCTAssertEqual(
+            MediaPermissionPolicy.sheetOrigin(topLevelURL: blank, requesterOrigin: "https://example.com"),
+            "https://example.com"
+        )
+        let longHost = "good.example.com." + String(repeating: "a", count: 40) + ".evil.test"
+        let longURL = try XCTUnwrap(URL(string: "https://\(longHost)/"))
+        let named = MediaPermissionPolicy.sheetOrigin(topLevelURL: longURL, requesterOrigin: "https://\(longHost)")
+        XCTAssertTrue(named.hasSuffix(".evil.test"))
+        XCTAssertFalse(named.contains("…"))
+    }
+
+    func testCrossOriginIframeCannotPrompt() throws {
+        let top = try XCTUnwrap(URL(string: "https://example.com/app"))
+        XCTAssertTrue(
+            MediaPermissionPolicy.allowsFrame(
+                isMainFrame: true,
+                requesterOrigin: "https://example.com",
+                topLevelURL: top
+            )
+        )
+        XCTAssertTrue(
+            MediaPermissionPolicy.allowsFrame(
+                isMainFrame: false,
+                requesterOrigin: "https://example.com",
+                topLevelURL: top
+            )
+        )
+        XCTAssertFalse(
+            MediaPermissionPolicy.allowsFrame(
+                isMainFrame: false,
+                requesterOrigin: "https://ads.example",
+                topLevelURL: top
+            )
+        )
+        XCTAssertFalse(
+            MediaPermissionPolicy.allowsFrame(
+                isMainFrame: false,
+                requesterOrigin: "https://example.com",
+                topLevelURL: nil
+            )
+        )
+        XCTAssertFalse(
+            MediaPermissionPolicy.allowsFrame(
+                isMainFrame: false,
+                requesterOrigin: "http://example.com",
+                topLevelURL: top
+            )
+        )
+    }
+
     func testInsecureOriginDeniedWithoutPrompt() {
         XCTAssertFalse(MediaPermissionPolicy.isEligibleOrigin("http://example.com"))
         XCTAssertFalse(MediaPermissionPolicy.isEligibleOrigin("file://localhost"))

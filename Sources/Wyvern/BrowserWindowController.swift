@@ -5,6 +5,7 @@ import AppKit
 import WyvernCore
 import Darwin
 import ObjectiveC
+import QuartzCore
 import WebKit
 
 @MainActor
@@ -154,6 +155,13 @@ final class ToolbarRow: NSView {
 final class TerminalSurface: NSView {
     var onAppearanceChange: (() -> Void)?
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if !wantsLayer {
+            wantsLayer = true
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         Theme.termBackground.setFill()
         bounds.fill()
@@ -183,6 +191,14 @@ final class DividerLine: NSView {
     }
 }
 
+/// Last placement of one source tab's DevTools pane during this window's session.
+struct DevToolsPlaceMemory: Equatable {
+    var side: DevToolsSide
+    var pageFraction: Double
+    var poppedOut: Bool
+    var windowed: Bool
+}
+
 @MainActor
 final class AccessibilityBridgeView: NSView {
     var bridged: NSView?
@@ -204,6 +220,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private let terminalPicker = TerminalBookmarkPicker()
     private var session: [SessionTab] = []
     private var activeID: UUID?
+    private let tiles = WindowTiles()
     var onClose: (() -> Void)?
     /// Called before tabs are shut down, so a snapshot can still see this window.
     var onPrepareClose: (() -> Void)?
@@ -244,11 +261,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private var importSheet: BookmarkImportSheetController?
     private let downloadsPopover = NSPopover()
     private let downloadsPopoverController = DownloadsPopoverController()
+    private let blockBadge = BlockedCountBadge()
+    private let blockPopover = NSPopover()
+    private let blockPopoverController = BlockedCountPopoverController()
+    private var blockListObserver: NSObjectProtocol?
     private var downloadsWidth: NSLayoutConstraint?
-    private var downloadsGap: NSLayoutConstraint?
-    /// Pins the health badge to the address field when the downloads button is hidden.
-    private var healthToAddressGap: NSLayoutConstraint?
     private var healthWidth: NSLayoutConstraint?
+    private let splitButton = SplitViewButton()
+    private let toolbarCluster = NSStackView()
+    private let layoutPopover = NSPopover()
+    private let layoutPicker = SplitLayoutPicker()
+    private var previousActiveID: UUID?
+    private var panePages: [UUID: NewTabPageView] = [:]
+    private var paneBookmarkPages: [UUID: BookmarksPageView] = [:]
+    private var healthArchive = PaneHealthArchive<NetworkHealthSnapshot>()
+    private var healthTabID: UUID?
+    private var tileStyleToken = 0
+    private var styledToken: [UUID: Int] = [:]
+    private var announcedPaneID: UUID?
+    /// Last content minimum written for the split. Resize does not write it again.
+    private var appliedTileContentMinWidth: CGFloat?
+    private var dragPreview: TileDropPreview?
+    private var dragPreviewTimer: Timer?
+    private var dragPreviewKey: String?
+    private var pendingPreviewRect = NSRect.zero
+    private var tileDragMonitor: Any?
+    private var tileDragCancelled = false
+    private var blockWidth: NSLayoutConstraint?
     private var settingsObserver: NSObjectProtocol?
     private var didEmitWindowID = false
     private var didEmitPopoverID = false
@@ -258,6 +297,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private var closeConfirmed = false
     private var barHeightConstraint: NSLayoutConstraint?
     private var guidedTour: GuidedTourOverlay?
+    private let linkedChip = DevToolsLinkedChip()
+    private var linkedChipWidth: NSLayoutConstraint?
+    private var linkedChipLeading: NSLayoutConstraint?
+    private let splitToast = SplitFullToast()
+    private var toastTimer: Timer?
+    private var toastUndoLayout: TileLayout?
+    private var toastUndoDevToolsID: UUID?
+    private var devToolsMemory: [UUID: DevToolsPlaceMemory] = [:]
+    private var devToolsHiddenAt: [UUID: Date] = [:]
+    /// Hidden inspector kept for 30 seconds after the DevTools tab closes, keyed by source id.
+    private var suspendedDevTools: [UUID: DevToolsTab] = [:]
+    private var isSyncingBars = false
+    private var standbyHosts: [UUID: WebInspectorHost] = [:]
+    private var standbyViews: [UUID: DevToolsStandbyView] = [:]
+    private var menuTrackingObserver: NSObjectProtocol?
+    private var pendingPreviewCaption = ""
+    private var didAlertDevToolsFailure = false
+    private var inspectionOpenInFlight: Set<UUID> = []
+    /// Recent external-scheme confirm sheets. A page cannot raise an unbounded prompt flood.
+    private var externalPromptTimes: [Date] = []
 
     init(
         bookmarks: BookmarkStore,
@@ -356,15 +415,65 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         downloadsPopover.animates = false
         downloadsPopover.delegate = self
         healthPopover.delegate = self
+        menuTrackingObserver = NotificationCenter.default.addObserver(
+            forName: NSMenu.didEndTrackingNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.noteInspectionMenus()
+            }
+        }
+        linkedChip.onActivate = { [weak self] in
+            self?.showSourceOfActiveDevTools()
+        }
+        splitToast.onUndo = { [weak self] in
+            self?.undoFullSplitToast()
+        }
         healthService.enabled = settings.settings.netHealthEnabled
         healthService.onSnapshot = { [weak self] snapshot in
             Task { @MainActor in
-                self?.healthBadge.snapshot = snapshot
-                self?.healthPanel?.apply(snapshot)
+                guard let self else { return }
+                // `stop()` publishes an empty host. Keep the pane's real samples for the next focus.
+                if let id = self.healthTabID ?? self.activeID, !snapshot.host.isEmpty {
+                    self.healthArchive.remember(snapshot, for: id)
+                }
+                self.healthPanel?.apply(snapshot)
+                self.healthBadge.snapshot = self.labeledHealth(snapshot)
             }
         }
         healthBadge.target = self
         healthBadge.action = #selector(healthBadgeTapped)
+        blockBadge.target = self
+        blockBadge.action = #selector(blockBadgeTapped)
+        blockPopover.contentViewController = blockPopoverController
+        blockPopover.behavior = .transient
+        blockPopover.animates = false
+        blockPopover.delegate = self
+        blockPopoverController.onPause = { [weak self] paused in
+            self?.setFocusedSitePaused(paused)
+        }
+        blockPopoverController.onTurnOn = { [weak self] in
+            BlockListController.shared.setBlockingEnabled(true)
+            self?.blockPopoverController.noteUserChange(success: true)
+            self?.refreshBlockPopover()
+        }
+        blockPopoverController.onReload = { [weak self] in
+            self?.reloadBlockBadgeTab()
+        }
+        blockPopoverController.onOpenSettings = { [weak self] in
+            self?.blockPopover.performClose(nil)
+            (NSApp.delegate as? AppDelegate)?.showBlockListSettings(nil)
+        }
+        blockListObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernBlockListStateDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            Task { @MainActor in
+                self?.applyBlockListChange(note)
+            }
+        }
         settingsObserver = NotificationCenter.default.addObserver(
             forName: .wyvernSettingsDidChange,
             object: nil,
@@ -376,6 +485,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                     BrowserTab.hardwareAcceleration = current.hardwareAcceleration
                     BrowserTab.defaultFontSize = current.defaultFontSize
                     BrowserTab.defaultZoomPercent = current.defaultZoomPercent
+                    BrowserTab.developerToolsEnabled = current.developerToolsEnabled
                 }
                 self?.applyWebPageMetrics()
                 self?.refreshAppearanceProbe()
@@ -396,12 +506,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         fatalError("init(coder:) has not been implemented")
     }
 
-    var canGoBack: Bool { activeTab?.canGoBack ?? false }
-    var canGoForward: Bool { activeTab?.canGoForward ?? false }
-    var isLoadingPage: Bool { activeTab?.surface == .web && activeTab?.isLoading == true }
+    var canGoBack: Bool { pageTab()?.canGoBack ?? false }
+    var canGoForward: Bool { pageTab()?.canGoForward ?? false }
+    var isLoadingPage: Bool { pageTab()?.surface == .web && pageTab()?.isLoading == true }
     /// Visible tabs only. Hidden kinds stay in the session and are not numbered.
     var tabCount: Int { visibleSession().count }
-    var canBookmarkCurrent: Bool { Self.allowsBookmark(activeTab?.displayedURL) }
+    var canBookmarkCurrent: Bool { Self.allowsBookmark(pageTab()?.displayedURL) }
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
@@ -414,6 +524,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         _ = notification
         BenchMarks.emitOnce("window-visible")
         updateHealthVisibility()
+        syncSplitChrome()
     }
 
     func windowDidResignKey(_ notification: Notification) {
@@ -451,7 +562,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     func addTab(
         configuration supplied: WKWebViewConfiguration? = nil,
         loadBlank: Bool = true,
-        autoplayURL: URL? = nil
+        autoplayURL: URL? = nil,
+        deferPresentation: Bool = false
     ) -> BrowserTab {
         if supplied == nil && loadBlank {
             BenchMarks.emit("tab-new-begin")
@@ -462,8 +574,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
         let surface: TabSurface = (supplied == nil && loadBlank) ? .newTab : .web
         let tab = BrowserTab(configuration: configuration, host: self, surface: surface)
-        session.append(.web(tab))
+        let members = TileStripGroup.memberIDs(
+            savedSplitTabIDs: tiles.tabIDs(),
+            splitExists: tiles.hasSavedSplit
+        )
+        let insertAt = TileStripGroup.insertionIndex(
+            session: session.map(\.id),
+            afterID: activeID,
+            members: members
+        )
+        session.insert(.web(tab), at: insertAt)
         activeID = tab.id
+        ensureStandby(for: tab)
+        if deferPresentation {
+            noteSessionChange()
+            return tab
+        }
         embedActiveSurface()
         if loadBlank && supplied == nil {
             tab.show(.newTab)
@@ -495,7 +621,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             }
             return
         }
+        // Closing DevTools keeps the inspector for 30 seconds. Closing the source shuts it down.
+        let parking = devToolsTab(id: id)
+        if let parking {
+            parking.suspend()
+            suspendedDevTools[parking.sourceID] = parking
+            devToolsHiddenAt[parking.sourceID] = Date()
+            armDevToolsExpiry(sourceID: parking.sourceID)
+        }
         removeSession(id: id)
+        guard let parking, window != nil, suspendedDevTools[parking.sourceID] === parking else { return }
+        parking.container.alphaValue = 0
+        if parking.container.superview == nil, let content = window?.contentView {
+            parking.container.frame = NSRect(x: -2000, y: -2000, width: 800, height: 600)
+            content.addSubview(parking.container)
+        }
     }
 
     /// Removes the tab without shutting it down. A web view keeps its history.
@@ -505,12 +645,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         guard session.indices.contains(index) else { return nil }
         let item = session.remove(at: index)
         let wasActive = item.id == activeID
+        let preferred = tiles.remove(tabID: item.id)
         switch item {
         case .web(let tab):
             tab.host = nil
             unembed(tab.webView)
         case .terminal(let tab):
             unembed(tab.view)
+        case .devtools(let tab):
+            unembed(tab.container)
         }
         if session.isEmpty {
             activeID = nil
@@ -518,11 +661,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             return item
         }
         if wasActive {
-            let next = min(index, session.count - 1)
-            activateTab(id: session[next].id, switching: true)
+            activateTab(id: resolvedCloseTarget(preferred: preferred, index: index), switching: true)
         }
         syncBars(progressOnly: false)
         noteSessionChange()
+        if !session.isEmpty {
+            focusPaneContentIfNeeded()
+        }
         return item
     }
 
@@ -534,6 +679,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
         if case .web(let web) = tab {
             web.host = self
+        }
+        if case .devtools(let tools) = tab {
+            tools.container.alphaValue = 1
+            tools.host.reparentCompanion()
         }
         var insertAt = index
         if insertAt < 0 {
@@ -613,17 +762,50 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
     }
 
+    /// A new press clears a cancelled drag so the next gesture is live.
+    func prepareTabDrag() {
+        tileDragCancelled = false
+    }
+
+    /// Reads and clears the Esc flag. Mouse-up captures it before the drop runs on the next turn.
+    func consumeTileDragCancellation() -> Bool {
+        let cancelled = tileDragCancelled
+        tileDragCancelled = false
+        return cancelled
+    }
+
     /// Drop of a tab drag. A strip under the pointer wins. Otherwise a release more than
     /// `TabDrag.detachDistance` from this strip, or outside this window, detaches the tab.
     /// The only tab in a window moves that window instead of leaving an empty one.
-    func finishTabDrag(tabID: UUID, screenPoint: NSPoint, cursorOffsetInTab: NSPoint) {
+    func finishTabDrag(tabID: UUID, screenPoint: NSPoint, cursorOffsetInTab: NSPoint, cancelled: Bool = false) {
+        let dropped = cancelled || tileDragCancelled
+        tileDragCancelled = false
+        endTileDragChrome()
+        guard !dropped else { return }
         guard let from = indexOfTab(id: tabID) else { return }
+        if pageContains(screenPoint) {
+            if let target = tileDropTarget(at: screenPoint, dragging: tabID) {
+                if tileDropCanApply(tabID: tabID, target: target) {
+                    performTileDrop(tabID: tabID, target: target)
+                }
+                // An edge that cannot tile still ends the drag. It does not detach.
+                return
+            }
+            let vertical = tabRegion.verticalDistance(toScreenPoint: screenPoint)
+            if vertical <= TabDrag.detachDistance {
+                // Near the strip, with no tile target, the drop cancels.
+                return
+            }
+        }
         if let (target, visibleIndex) = Self.stripTarget(at: screenPoint) {
             let destination = target.sessionIndex(forVisibleDrop: visibleIndex)
             if target === self {
+                removeFromSplitIfDroppedOutside(tabID: tabID, visibleIndex: visibleIndex)
                 moveTab(from: from, to: destination)
             } else if let tab = detachTab(at: from) {
                 target.adopt(tab: tab, at: destination)
+                movePartnerDevTools(of: tab, to: target)
+                noteDevToolsDraggedToAnotherWindow(tab)
                 closeIfEmpty()
             }
             return
@@ -640,10 +822,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 )
             } else if let tab = detachTab(at: from) {
                 openWindow(adopting: tab, dropScreenPoint: screenPoint, cursorOffsetInTab: cursorOffsetInTab)
+                if case .web(let web) = tab, let home = windowHosting(tab: web.id) {
+                    movePartnerDevTools(of: tab, to: home)
+                }
+                noteDevToolsDraggedToAnotherWindow(tab)
             }
             return
         }
-        moveTab(from: from, to: sessionIndex(forVisibleDrop: tabRegion.dropIndex(atScreenPoint: screenPoint)))
+        let visibleIndex = tabRegion.dropIndex(atScreenPoint: screenPoint)
+        removeFromSplitIfDroppedOutside(tabID: tabID, visibleIndex: visibleIndex)
+        moveTab(from: from, to: sessionIndex(forVisibleDrop: visibleIndex))
     }
 
     func tabStripDropIndex(atScreenPoint screenPoint: NSPoint) -> Int? {
@@ -738,7 +926,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     func openTerminalBookmark(id: UUID) {
         guard let bookmark = terminalBookmarks.bookmark(id: id), bookmark.enabled else { return }
         let openInNewTab = settings.settings.terminalOpenInNewTab && bookmark.openInNewTab
+        var replacedID: UUID?
         if !openInNewTab, let current = activeTerminalTab {
+            replacedID = current.id
             session.removeAll { $0.id == current.id }
             current.shutdown()
         }
@@ -759,6 +949,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         tab.attach()
         session.append(.terminal(tab))
         activeID = tab.id
+        if let replacedID {
+            tiles.replace(tabID: replacedID, with: tab.id, kind: .terminal)
+        }
         embedActiveSurface()
         window?.contentView?.layoutSubtreeIfNeeded()
         terminalHost.layoutSubtreeIfNeeded()
@@ -795,27 +988,50 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     func goBack() {
-        guard activeTab?.surface == .web else { return }
-        activeTab?.webView.goBack()
+        guard let tab = pageTab(), tab.surface == .web else { return }
+        tab.webView.goBack()
     }
 
     func goForward() {
-        guard activeTab?.surface == .web else { return }
-        activeTab?.webView.goForward()
+        guard let tab = pageTab(), tab.surface == .web else { return }
+        tab.webView.goForward()
     }
 
     func reloadPage() {
-        guard activeTab?.surface == .web else { return }
-        activeTab?.webView.reload()
+        guard let tab = pageTab(), tab.surface == .web else { return }
+        tab.webView.reload()
+    }
+
+    /// Reloads every web tab in this window. Settings uses it for "Reload All".
+    func reloadAllWebTabs() {
+        for item in session {
+            if case .web(let tab) = item, tab.surface == .web {
+                tab.webView.reload()
+            }
+        }
+    }
+
+    /// Blocked-request count for the toolbar badge.
+    /// A visible split counts the focused pane, not the strip's selected tab when they differ.
+    /// A terminal pane counts as zero.
+    func blockedCountForFocusedTab(_ tab: BrowserTab?) -> Int {
+        switch blockBadgeSubject() {
+        case .terminal:
+            return 0
+        case .web(let focused):
+            return focused.blockedRequestCount
+        case .strip:
+            return tab?.blockedRequestCount ?? 0
+        }
     }
 
     func stopLoading() {
-        guard activeTab?.surface == .web else { return }
-        activeTab?.webView.stopLoading()
+        guard let tab = pageTab(), tab.surface == .web else { return }
+        tab.webView.stopLoading()
     }
 
     func reloadOrStop() {
-        guard let tab = activeTab, tab.surface == .web else { return }
+        guard let tab = pageTab(), tab.surface == .web else { return }
         if tab.isLoading {
             tab.webView.stopLoading()
         } else {
@@ -841,7 +1057,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     func toggleBookmark() {
-        guard let tab = activeTab, let url = tab.displayedURL, Self.allowsBookmark(url) else { return }
+        guard let tab = pageTab(), let url = tab.displayedURL, Self.allowsBookmark(url) else { return }
         let raw = url.absoluteString
         if let existing = bookmarks.bookmark(matchingURL: raw) {
             bookmarks.remove(id: existing.id)
@@ -852,7 +1068,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
 
     /// Address-bar shortcut adds the current page. It does not remove an existing bookmark.
     func addBookmark() {
-        guard let tab = activeTab, let url = tab.displayedURL, Self.allowsBookmark(url) else { return }
+        guard let tab = pageTab(), let url = tab.displayedURL, Self.allowsBookmark(url) else { return }
         let raw = url.absoluteString
         let title = tab.title == "New Tab" || tab.title == "Bookmarks" ? raw : tab.title
         bookmarks.add(title: title, url: raw)
@@ -904,6 +1120,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     func windowDidResize(_ notification: Notification) {
         terminalPicker.dismiss()
         positionTrafficLightContainers(endLayoutPass: true)
+        updateTileWindowMinSize()
+        rememberDevToolsWindowFrameIfNeeded()
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
@@ -924,16 +1142,28 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     func captureSnapshot() -> SessionWindowSnapshot {
-        let tabs = session.map { item -> SessionTabSnapshot in
+        var tabs: [SessionTabSnapshot] = []
+        var indexByID: [UUID: Int] = [:]
+        for item in session {
+            let snapshot: SessionTabSnapshot
             switch item {
             case .web(let tab):
-                return SessionTabSnapshot(kind: .web, url: tab.displayedURL?.absoluteString, terminalBookmarkID: nil)
+                snapshot = SessionTabSnapshot(kind: .web, url: tab.displayedURL?.absoluteString, terminalBookmarkID: nil)
             case .terminal(let tab):
-                return SessionTabSnapshot(kind: .terminal, url: nil, terminalBookmarkID: tab.bookmarkID)
+                snapshot = SessionTabSnapshot(kind: .terminal, url: nil, terminalBookmarkID: tab.bookmarkID)
+            case .devtools(let tab):
+                snapshot = SessionTabSnapshot(
+                    kind: .devtools,
+                    url: tab.sourceURL?.absoluteString,
+                    devtoolsSourceIndex: indexByID[tab.sourceID]
+                )
             }
+            indexByID[item.id] = tabs.count
+            tabs.append(snapshot)
         }
-        let selected = session.firstIndex(where: { $0.id == activeID }) ?? 0
-        return SessionWindowSnapshot(tabs: tabs, selectedIndex: selected)
+        let selected = activeID.flatMap { indexByID[$0] } ?? 0
+        let tile = tiles.capture { indexByID[$0] }
+        return SessionWindowSnapshot(tabs: tabs, selectedIndex: selected, tile: tile)
     }
 
     func searchEntries() -> [TabSearchEntry] {
@@ -948,6 +1178,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 )
             case .terminal(let tab):
                 return TabSearchEntry(id: tab.id, title: tab.name, url: tab.command, kind: .terminal)
+            case .devtools(let tab):
+                return TabSearchEntry(
+                    id: tab.id,
+                    title: tab.displayTitle,
+                    url: tab.sourceURL?.absoluteString ?? "",
+                    kind: .devtools
+                )
             }
         }
     }
@@ -974,25 +1211,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         suppressSessionNotes = true
         defer { suppressSessionNotes = wasSuppressed }
         for item in session {
+            if case .devtools(let tab) = item {
+                tab.shutdown()
+            }
+        }
+        for item in session {
             switch item {
             case .web(let tab):
                 tab.shutdown()
             case .terminal(let tab):
                 tab.shutdown()
+            case .devtools:
+                break
             }
         }
         session.removeAll()
         activeID = nil
-        var created: [(index: Int, id: UUID)] = []
+        tiles.clear()
+        var created: [Int: UUID] = [:]
         for (index, record) in snapshot.tabs.enumerated() {
+            if record.kind == .devtools { continue }
             let before = session.count
             appendRestored(record)
             if session.count > before, let id = session.last?.id {
-                created.append((index, id))
+                created[index] = id
             }
         }
+        for (index, record) in snapshot.tabs.enumerated() where record.kind == .devtools {
+            guard let sourceIndex = record.devtoolsSourceIndex,
+                  let sourceID = created[sourceIndex],
+                  let source = webTab(id: sourceID) else { continue }
+            let tools = makeRestoredDevTools(source: source)
+            session.append(.devtools(tools))
+            created[index] = tools.id
+        }
         guard !session.isEmpty else { return false }
-        let chosen = created.last(where: { $0.index <= snapshot.selectedIndex })?.id ?? session[0].id
+        tiles.restore(snapshot.tile) { index in created[index] }
+        let chosenIndex = created.keys.filter { $0 <= snapshot.selectedIndex }.max()
+        let chosen = chosenIndex.flatMap { created[$0] } ?? session[0].id
         activateTab(id: chosen, switching: true)
         syncBars(progressOnly: false)
         return true
@@ -1004,6 +1260,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         for item in session {
             if case .web(let tab) = item {
                 tab.applyPageMetrics(fontSize: font, zoomPercent: zoom)
+                tab.applyInspectability()
+                ensureStandby(for: tab)
             }
         }
     }
@@ -1012,15 +1270,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         switch record.kind {
         case .web:
             let tab = addTab(loadBlank: false)
-            let raw = record.url?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !raw.isEmpty, let url = URL(string: raw) else {
+            switch SessionRestorePolicy.webLoad(for: record.url) {
+            case .newTab:
                 tab.show(.newTab)
-                return
+            case .web(let url):
+                tab.load(url: url, userTypedFile: false)
+            case .localDocument(let url):
+                tab.load(url: url, userTypedFile: true)
             }
-            tab.load(url: url, userTypedFile: url.scheme?.lowercased() == "file")
         case .terminal:
             guard let id = record.terminalBookmarkID else { return }
             appendTerminalBookmark(id: id)
+        case .devtools:
+            // Restored in a second pass so the source tab already exists.
+            return
         }
     }
 
@@ -1092,11 +1355,29 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             NotificationCenter.default.removeObserver(downloadsObserver)
             self.downloadsObserver = nil
         }
+        if let blockListObserver {
+            NotificationCenter.default.removeObserver(blockListObserver)
+            self.blockListObserver = nil
+        }
         downloadsPopover.performClose(nil)
+        blockPopover.performClose(nil)
         terminalPicker.dismiss()
+        rememberDevToolsWindowFrameIfNeeded()
+        toastTimer?.invalidate()
+        toastTimer = nil
+        if let menuTrackingObserver {
+            NotificationCenter.default.removeObserver(menuTrackingObserver)
+            self.menuTrackingObserver = nil
+        }
+        tiles.release()
         dismissMediaPrompt(grant: false)
         if let sheet = importSheet?.window {
             window?.endSheet(sheet)
+        }
+        for item in session {
+            if case .devtools(let tab) = item {
+                tab.shutdown()
+            }
         }
         for item in session {
             switch item {
@@ -1104,16 +1385,34 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 tab.shutdown()
             case .terminal(let tab):
                 tab.shutdown()
+            case .devtools:
+                break
             }
         }
+        for host in standbyHosts.values {
+            host.shutdown()
+        }
+        standbyHosts.removeAll()
+        for parked in suspendedDevTools.values {
+            parked.shutdown()
+        }
+        suspendedDevTools.removeAll()
+        devToolsHiddenAt.removeAll()
         session.removeAll()
         onClose?()
     }
 
     func browserTabDidUpdate(_ tab: BrowserTab, progressOnly: Bool) {
-        guard tab.id == activeTab?.id || !progressOnly else { return }
-        if tab.id == activeTab?.id || session.contains(where: { $0.id == tab.id }) {
-            syncBars(progressOnly: progressOnly && tab.id == activeTab?.id)
+        if let tools = devToolsTab(forSource: tab.id) {
+            tools.noteSourceTitle(tab.title)
+        }
+        if !progressOnly {
+            ensureStandby(for: tab)
+        }
+        let showsThisPage = tab.id == activeTab?.id || activeDevToolsTab()?.sourceID == tab.id
+        guard showsThisPage || !progressOnly else { return }
+        if showsThisPage || session.contains(where: { $0.id == tab.id }) {
+            syncBars(progressOnly: progressOnly && showsThisPage)
         }
         if !progressOnly {
             noteSessionChange()
@@ -1136,19 +1435,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     func browserTab(_ tab: BrowserTab, confirmExternal url: URL) {
+        guard ExternalLaunchPolicy.allowsConfirmation(url) else { return }
+        let now = Date()
+        let gate = ExternalPromptGate.allow(recent: externalPromptTimes, now: now)
+        externalPromptTimes = gate.retained
+        guard gate.allow else { return }
         let alert = NSAlert()
         alert.messageText = "Open this link outside \(AppInfo.displayName)?"
-        alert.informativeText = url.absoluteString
+        alert.informativeText = ExternalLaunchPolicy.promptText(for: url)
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         if let window {
             alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn {
+                if response == .alertFirstButtonReturn, ExternalLaunchPolicy.allowsConfirmation(url) {
                     NSWorkspace.shared.open(url)
                 }
             }
-        } else if alert.runModal() == .alertFirstButtonReturn {
+        } else if alert.runModal() == .alertFirstButtonReturn, ExternalLaunchPolicy.allowsConfirmation(url) {
             NSWorkspace.shared.open(url)
         }
     }
@@ -1200,8 +1504,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     func browserTab(_ tab: BrowserTab, hostDidChange host: String?) {
-        guard tab.id == activeID else { return }
-        feedHealth(host: host, url: tab.displayedURL)
+        let toolsActive = activeDevToolsTab()?.sourceID == tab.id
+        guard tab.id == activeID || toolsActive else { return }
+        feedHealth(host: host, url: tab.displayedURL, rememberAs: tab.id)
     }
 
     func presentBookmarkImport() {
@@ -1215,11 +1520,56 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             Task { @MainActor in
                 self?.importSheet = nil
                 self?.bookmarksPage.reload()
+                self?.paneBookmarkPages.values.forEach { $0.reload() }
             }
         }
     }
 
-    /// The active web tab. Nil while a terminal tab is selected.
+    /// The Develop menu inspects the focused web tab, including the focused pane of a split.
+    /// A focused DevTools tab acts on its source page. Nil for a terminal tab, the new-tab page,
+    /// bookmarks, or when Show Develop menu is off.
+    func focusedWebInspectorTarget() -> BrowserTab? {
+        if let tools = activeDevToolsTab() {
+            let source = webTab(id: tools.sourceID) ?? webTabInAnyWindow(id: tools.sourceID)
+            if let source, source.surface == .web {
+                return source
+            }
+            return nil
+        }
+        guard let tab = activeTab else { return nil }
+        guard DeveloperTools.shouldBeInspectable(
+            surface: WebContentSurface(tab.surface),
+            setting: settings.settings.developerToolsEnabled
+        ) else {
+            return nil
+        }
+        return tab
+    }
+
+    /// ⌥⌘I can open an inspectable page or hide a DevTools tab that is already focused.
+    var canToggleWebInspector: Bool {
+        if activeDevToolsTab() != nil { return true }
+        return focusedWebInspectorTarget() != nil
+    }
+
+    /// Hide while this window is showing that page's DevTools tab.
+    var devToolsMenuTitleIsHide: Bool {
+        if activeDevToolsTab() != nil { return true }
+        if let source = focusedWebInspectorTarget(), let tools = devToolsTab(forSource: source.id) {
+            return devToolsIsShowing(tools)
+        }
+        return false
+    }
+
+    /// The page navigation commands act on. A focused DevTools tab uses its source page.
+    private func pageTab() -> BrowserTab? {
+        if let tools = activeDevToolsTab() {
+            return webTab(id: tools.sourceID) ?? webTabInAnyWindow(id: tools.sourceID)
+        }
+        return activeTab
+    }
+
+    /// The active web tab. Nil while a terminal tab or a DevTools tab is selected.
     /// A nil selection still falls back to the first web tab, matching the previous window.
     private var activeTab: BrowserTab? {
         if let activeID {
@@ -1299,14 +1649,95 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         addressField.onToggleStar = { [weak self] in self?.toggleBookmark() }
 
         tabRegion.onSelect = { [weak self] id in
-            self?.activateTab(id: id, switching: true)
-            self?.syncBars(progressOnly: false)
+            guard let self else { return }
+            self.activateTab(id: id, switching: true)
+            self.syncBars(progressOnly: false)
+            if self.tiles.isSplitVisible(activeID: id) {
+                self.focusPaneContent()
+            }
         }
         tabRegion.onClose = { [weak self] id in
             self?.closeTab(id: id)
         }
+        tabRegion.contextMenuForTab = { [weak self] id in
+            self?.tabContextMenu(for: id)
+        }
         tabRegion.onNewTab = { [weak self] in
             _ = self?.addTab()
+        }
+        tabRegion.onTabDrag = { [weak self] id, point in
+            self?.updateTileDrag(tabID: id, screenPoint: point)
+        }
+        tiles.contentForTab = { [weak self] id, focused in
+            self?.tileContent(id: id, focused: focused)
+        }
+        tiles.onFocusTab = { [weak self] id in
+            guard let self else { return }
+            if self.activeID != id {
+                self.activateTab(id: id, switching: true)
+                self.syncBars(progressOnly: false)
+                self.focusPaneContent()
+            }
+            self.syncBlockBadgeForFocusedPane()
+        }
+        tiles.onChange = { [weak self] in
+            self?.noteSessionChange()
+        }
+        tiles.canvas.devToolsMoveMenu = { [weak self] id in
+            self?.devToolsMoveMenu(for: id)
+        }
+        tiles.canvas.onPopOut = { [weak self] id in
+            self?.popOutDevTools(id: id)
+        }
+        tiles.canvas.onDevToolsOverflow = { [weak self] id, anchor in
+            self?.showDevToolsOverflow(id: id, anchor: anchor)
+        }
+        tiles.pendingMakeMain = { [weak self] id in
+            guard let self else { return }
+            self.activateTab(id: id, switching: false)
+            self.performUnsplit()
+        }
+        tiles.pendingClose = { [weak self] id in
+            self?.closeTab(id: id)
+        }
+        tiles.canvas.onAppearance = { [weak self] in
+            guard let self else { return }
+            self.tileStyleToken += 1
+            if self.tiles.isSplitVisible(activeID: self.activeID) {
+                self.tiles.present()
+            }
+        }
+        tiles.canvas.onStructureChange = { [weak self] in
+            guard let self, self.responderIsInsideCanvas() else { return }
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.focusPaneContentIfNeeded()
+                }
+            }
+        }
+        layoutPicker.onChoose = { [weak self] arrangement in
+            self?.layoutPopover.performClose(nil)
+            self?.applyArrangement(arrangement)
+        }
+        let layoutController = NSViewController()
+        layoutPicker.frame = NSRect(x: 0, y: 0, width: 260, height: 46)
+        layoutController.view = layoutPicker
+        layoutPopover.contentViewController = layoutController
+        layoutPopover.contentSize = NSSize(width: 260, height: 46)
+        layoutPopover.behavior = .transient
+        layoutPopover.animates = false
+        splitButton.glyph = .split2
+        splitButton.pointSize = MonoMetrics.navGlyph
+        splitButton.tint = Theme.mute
+        splitButton.fill = .clear
+        splitButton.toolTip = "Split View"
+        splitButton.setAccessibilityLabel("Split View")
+        splitButton.setAccessibilityIdentifier("wyvern.toolbar.splitView")
+        splitButton.onPress = { [weak self] in
+            self?.splitViewClicked()
+        }
+        splitButton.onLongPress = { [weak self] in
+            self?.showLayoutPopover()
         }
         tabRegion.onTerminalPicker = { [weak self] anchor in
             self?.toggleTerminalPicker(anchor: anchor)
@@ -1332,9 +1763,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         toolbar.addSubview(backButton)
         toolbar.addSubview(forwardButton)
         toolbar.addSubview(reloadButton)
+        linkedChip.translatesAutoresizingMaskIntoConstraints = false
+        linkedChip.isHidden = true
+        toolbar.addSubview(linkedChip)
         toolbar.addSubview(addressField)
         bar.addSubview(tabRegion)
-        toolbar.addSubview(downloadsButton)
+        toolbarCluster.orientation = .horizontal
+        toolbarCluster.alignment = .centerY
+        toolbarCluster.spacing = MonoMetrics.itemGap
+        toolbarCluster.detachesHiddenViews = true
+        toolbarCluster.translatesAutoresizingMaskIntoConstraints = false
+        toolbarCluster.setAccessibilityElement(false)
+        toolbarCluster.setContentHuggingPriority(.required, for: .horizontal)
+        toolbarCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        splitButton.translatesAutoresizingMaskIntoConstraints = false
+        blockBadge.translatesAutoresizingMaskIntoConstraints = false
+        toolbar.addSubview(toolbarCluster)
+        toolbarCluster.addArrangedSubview(splitButton)
+        toolbarCluster.addArrangedSubview(downloadsButton)
+        toolbarCluster.addArrangedSubview(blockBadge)
         toolbar.addSubview(healthBadge)
         bar.addSubview(appearanceProbe)
         axBridge.translatesAutoresizingMaskIntoConstraints = false
@@ -1343,6 +1790,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         pageHost.addSubview(terminalHost)
         pageHost.addSubview(bookmarksPage)
         pageHost.addSubview(newTabPage)
+        tiles.canvas.translatesAutoresizingMaskIntoConstraints = false
+        tiles.canvas.isHidden = true
+        pageHost.addSubview(tiles.canvas)
+        splitToast.translatesAutoresizingMaskIntoConstraints = false
+        splitToast.isHidden = true
+        pageHost.addSubview(splitToast)
 
         healthBadge.translatesAutoresizingMaskIntoConstraints = false
         appearanceProbe.isHidden = false
@@ -1379,6 +1832,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         downloadsButton.action = #selector(downloadsTapped)
         downloadsButton.translatesAutoresizingMaskIntoConstraints = false
         downloadsButton.isHidden = true
+
+        blockBadge.translatesAutoresizingMaskIntoConstraints = false
+        blockBadge.isHidden = true
 
         tabRegion.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         tabRegion.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1424,7 +1880,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             reloadButton.widthAnchor.constraint(equalToConstant: MonoMetrics.control),
             reloadButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
 
-            addressField.leadingAnchor.constraint(equalTo: reloadButton.trailingAnchor, constant: MonoMetrics.itemGap),
+            linkedChip.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            addressField.leadingAnchor.constraint(equalTo: linkedChip.trailingAnchor, constant: MonoMetrics.itemGap),
+            addressField.trailingAnchor.constraint(equalTo: toolbarCluster.leadingAnchor, constant: -MonoMetrics.itemGap),
             addressField.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             addressField.heightAnchor.constraint(equalToConstant: MonoMetrics.urlHeight),
 
@@ -1433,9 +1891,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             tabRegion.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
             tabRegion.heightAnchor.constraint(equalToConstant: MonoMetrics.tabHeight),
 
-            downloadsButton.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            splitButton.widthAnchor.constraint(equalToConstant: MonoMetrics.control),
+            splitButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
             downloadsButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
-            downloadsButton.trailingAnchor.constraint(equalTo: healthBadge.leadingAnchor, constant: -MonoMetrics.itemGap),
+            blockBadge.heightAnchor.constraint(equalToConstant: MonoMetrics.blockBadgeHeight),
+
+            toolbarCluster.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
+            toolbarCluster.trailingAnchor.constraint(equalTo: healthBadge.leadingAnchor, constant: -MonoMetrics.itemGap),
 
             healthBadge.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
             healthBadge.heightAnchor.constraint(equalToConstant: MonoMetrics.netHealthBadgeHeight),
@@ -1452,20 +1914,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             axBridge.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             axBridge.topAnchor.constraint(equalTo: bar.topAnchor),
             axBridge.widthAnchor.constraint(equalToConstant: 1),
-            axBridge.heightAnchor.constraint(equalToConstant: 1)
+            axBridge.heightAnchor.constraint(equalToConstant: 1),
+
+            splitToast.centerXAnchor.constraint(equalTo: pageHost.centerXAnchor),
+            splitToast.topAnchor.constraint(equalTo: pageHost.topAnchor, constant: 16),
+            splitToast.heightAnchor.constraint(equalToConstant: 36)
         ])
+        let chipLeading = linkedChip.leadingAnchor.constraint(equalTo: reloadButton.trailingAnchor)
+        chipLeading.isActive = true
+        linkedChipLeading = chipLeading
+        let chipWidth = linkedChip.widthAnchor.constraint(equalToConstant: 0)
+        chipWidth.isActive = true
+        linkedChipWidth = chipWidth
         let width = downloadsButton.widthAnchor.constraint(equalToConstant: 0)
-        let gap = downloadsButton.leadingAnchor.constraint(equalTo: addressField.trailingAnchor, constant: MonoMetrics.itemGap)
-        let fallback = healthBadge.leadingAnchor.constraint(equalTo: addressField.trailingAnchor, constant: MonoMetrics.itemGap)
         let healthW = healthBadge.widthAnchor.constraint(equalToConstant: 92)
+        let blockW = blockBadge.widthAnchor.constraint(equalToConstant: 0)
         healthWidth = healthW
         healthW.isActive = true
         downloadsWidth = width
-        downloadsGap = gap
-        healthToAddressGap = fallback
         width.isActive = true
-        gap.isActive = false
-        fallback.isActive = true
+        blockWidth = blockW
+        blockW.isActive = true
         let barHeight = bar.heightAnchor.constraint(equalToConstant: MonoMetrics.barHeight)
         barHeightConstraint = barHeight
         barHeight.isActive = true
@@ -1476,6 +1945,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         pinToEdges(terminalHost)
         pinToEdges(bookmarksPage)
         pinToEdges(newTabPage)
+        pinToEdges(tiles.canvas)
         bookmarksPage.isHidden = true
         newTabPage.isHidden = true
         terminalHost.isHidden = true
@@ -1487,9 +1957,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func applyNetHealthSetting() {
         let on = settings.settings.netHealthEnabled
         healthService.enabled = on
-        healthBadge.isHidden = !on
         healthBadge.setAccessibilityElement(on)
-        healthWidth?.constant = on ? 92 : 0
+        let width = CGFloat(BlockedBadgeVisibility.constraintWidth(visible: on, preferredWidth: 92))
+        if on {
+            healthWidth?.constant = width
+            healthBadge.isHidden = false
+        } else {
+            healthBadge.isHidden = true
+            healthWidth?.constant = width
+        }
+        syncRightCluster()
         if !on {
             healthPopover.close()
             healthService.stop()
@@ -1597,17 +2074,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         positionTrafficLightContainers(endLayoutPass: false)
     }
 
-    private func feedHealth(host: String?, url: URL?) {
+    private func feedHealth(host: String?, url: URL?, rememberAs: UUID? = nil) {
+        healthTabID = rememberAs ?? activeID
         guard settings.settings.netHealthEnabled else {
             healthService.stop()
             return
         }
         let scheme = url?.scheme?.lowercased() ?? ""
+        let remembered = healthTabID.flatMap { healthArchive.record(for: $0) }
         if let host, !host.isEmpty, scheme == "http" || scheme == "https" {
-            healthService.start(host: host, scheme: scheme)
+            let matches = remembered?.host.lowercased() == host.lowercased()
+                && remembered?.scheme.lowercased() == scheme
+            if matches, let remembered {
+                healthBadge.snapshot = labeledHealth(remembered)
+                healthPanel?.apply(remembered)
+            }
+            healthService.start(host: host, scheme: scheme, restoring: matches ? remembered : nil)
         } else {
             healthService.stop()
         }
+    }
+
+    /// VoiceOver hears which pane the badge is describing. The stored snapshot stays unchanged.
+    private func labeledHealth(_ snapshot: NetworkHealthSnapshot) -> NetworkHealthSnapshot {
+        guard let id = activeID, tiles.isSplitVisible(activeID: id), let layout = tiles.layout else {
+            return snapshot
+        }
+        let suffix = ", \(layout.spokenPlace(of: id))"
+        var copy = snapshot
+        if !copy.accessibilityLabel.hasSuffix(suffix) {
+            copy.accessibilityLabel += suffix
+        }
+        return copy
     }
 
     @objc private func healthBadgeTapped() {
@@ -1636,6 +2134,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         if popover === downloadsPopover {
             downloadsButton.extraAccessibilityChild = nil
         }
+        if popover === blockPopover {
+            blockBadge.extraAccessibilityChild = nil
+            blockPopoverController.resetTransient()
+        }
     }
 
     private func pinToEdges(_ view: NSView) {
@@ -1662,14 +2164,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         if switching {
             BenchMarks.emit("tab-switch-begin")
         }
+        if let previous = activeID, previous != id {
+            previousActiveID = previous
+            if settings.settings.netHealthEnabled {
+                healthArchive.remember(healthService.currentSnapshot, for: previous)
+            }
+        }
         activeID = id
         embedActiveSurface()
         presentActiveTabForBench()
         if switching {
             BenchMarks.emit("tab-switch-completed")
         }
-        if let tab = activeTab {
-            feedHealth(host: tab.displayedURL?.host, url: tab.displayedURL)
+        if let tab = pageTab() {
+            feedHealth(host: tab.displayedURL?.host, url: tab.displayedURL, rememberAs: tab.id)
         } else {
             feedHealth(host: nil, url: nil)
         }
@@ -1686,10 +2194,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
         webContainer.layoutSubtreeIfNeeded()
         webContainer.displayIfNeeded()
+        tiles.canvas.layoutSubtreeIfNeeded()
+        tiles.canvas.displayIfNeeded()
         window?.displayIfNeeded()
     }
 
     private func embedActiveSurface() {
+        if let id = activeID, tiles.isSplitVisible(activeID: id) {
+            showSplit(focus: id)
+            return
+        }
+        tiles.release()
+        rehomeSharedPages()
+        embedSoloSurface()
+    }
+
+    private func embedSoloSurface() {
         if activeTerminalTab != nil {
             for subview in webContainer.subviews {
                 subview.removeFromSuperview()
@@ -1702,14 +2222,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         for subview in terminalHost.subviews {
             subview.removeFromSuperview()
         }
+        if let tools = activeDevToolsTab() {
+            tools.container.alphaValue = 1
+            embed(tools.container, in: webContainer)
+            tools.attachAndShowIfNeeded()
+            return
+        }
         embedActiveWebView()
     }
 
     private func embed(_ view: NSView, in host: NSView, insets: NSEdgeInsets = NSEdgeInsets()) {
-        if view.superview === host { return }
+        // Re-adding a view that is already here removes it first and flashes WKWebView.
+        if !HostedViewPlacement.shouldMove(isChildOfTarget: view.superview === host) { return }
         for subview in host.subviews {
             subview.removeFromSuperview()
         }
+        view.alphaValue = 1
         view.translatesAutoresizingMaskIntoConstraints = false
         host.addSubview(view)
         NSLayoutConstraint.activate([
@@ -1723,7 +2251,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func embedActiveWebView() {
         guard let webView = activeTab?.webView else { return }
         webView.underPageBackgroundColor = Theme.page
-        if webView.superview === webContainer { return }
+        if !HostedViewPlacement.shouldMove(isChildOfTarget: webView.superview === webContainer) { return }
         for subview in webContainer.subviews {
             subview.removeFromSuperview()
         }
@@ -1738,18 +2266,41 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     private func syncBars(progressOnly: Bool) {
+        if isSyncingBars { return }
+        isSyncingBars = true
+        defer { isSyncingBars = false }
         ensureVisibleSelection()
+        if progressOnly {
+            if let tools = activeDevToolsTab() {
+                let source = webTab(id: tools.sourceID)
+                let loading = source?.surface == .web && source?.isLoading == true && (source?.estimatedProgress ?? 1) < 1
+                frameBar.showsProgress = loading
+                frameBar.fraction = loading ? (source?.estimatedProgress ?? 0) : 0
+                return
+            }
+            guard activeTerminalTab == nil, let tab = activeTab else { return }
+            let loading = tab.surface == .web && tab.isLoading && tab.estimatedProgress < 1
+            frameBar.showsProgress = loading
+            frameBar.fraction = loading ? tab.estimatedProgress : 0
+            return
+        }
+        alignStripToTiles()
+        if let tools = activeDevToolsTab() {
+            syncDevToolsBars(tools)
+            return
+        }
+        setLinkedChip(visible: false, title: "", url: nil)
         if let terminal = activeTerminalTab {
             syncTerminalBars(terminal)
             return
         }
-        guard let tab = activeTab else { return }
+        guard let tab = activeTab else {
+            syncSplitChrome()
+            return
+        }
         let loading = tab.surface == .web && tab.isLoading && tab.estimatedProgress < 1
         frameBar.showsProgress = loading
         frameBar.fraction = loading ? tab.estimatedProgress : 0
-        if progressOnly {
-            return
-        }
         backButton.isEnabled = tab.canGoBack
         forwardButton.isEnabled = tab.canGoForward
         reloadButton.isEnabled = true
@@ -1760,6 +2311,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         let allowed = Self.allowsBookmark(tab.displayedURL)
         let bookmarked = allowed && tab.displayedURL.flatMap { bookmarks.bookmark(matchingURL: $0.absoluteString) } != nil
         addressField.present(url: tab.displayedURL, bookmarked: bookmarked, canBookmark: allowed)
+        syncBlockBadgeForFocusedPane()
         window?.title = "\(tab.title) — \(AppInfo.displayName)"
         feedHealth(host: tab.displayedURL?.host, url: tab.displayedURL)
         refreshAppearanceProbe()
@@ -1774,6 +2326,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         if tab.surface == .newTab {
             newTabPage.reload()
         }
+        applyTileVisibility()
     }
 
     private func syncTerminalBars(_ terminal: TerminalTab) {
@@ -1787,6 +2340,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         terminal.fontSize = CGFloat(settings.settings.terminalFontSize)
         terminal.applyColors()
         addressField.presentCommand(terminal.command, caption: terminal.fieldCaption)
+        syncBlockBadgeForFocusedPane()
         window?.title = "\(terminal.name) — \(AppInfo.displayName)"
         feedHealth(host: nil, url: nil)
         refreshAppearanceProbe()
@@ -1796,13 +2350,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         webContainer.isHidden = true
         bookmarksPage.isHidden = true
         newTabPage.isHidden = true
+        applyTileVisibility()
     }
 
     private func stripItems(selectedID: UUID) -> [TabStripItem] {
-        visibleSession().map { item in
+        let members = TileStripGroup.memberIDs(
+            savedSplitTabIDs: tiles.tabIDs(),
+            splitExists: tiles.hasSavedSplit
+        )
+        let glyph = members.isEmpty ? nil : stripGlyph()
+        let count = members.count
+        let rows = visibleSession().map { item in
+            let grouped = members.contains(item.id)
             switch item {
             case .web(let tab):
-                return tabItem(for: tab, selected: tab.id == selectedID)
+                return tabItem(
+                    for: tab,
+                    selected: tab.id == selectedID,
+                    groupMember: grouped,
+                    splitGlyph: grouped ? glyph : nil,
+                    memberCount: grouped ? count : 0
+                )
             case .terminal(let tab):
                 return TabStripItem(
                     id: tab.id,
@@ -1811,50 +2379,120 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                     badgeHex: "",
                     favicon: nil,
                     selected: tab.id == selectedID,
+                    groupMember: grouped,
+                    splitGlyph: grouped ? glyph : nil,
+                    memberCount: grouped ? count : 0,
                     kind: .terminal,
                     glyph: .terminal,
                     accessibilityLabel: "Terminal tab",
                     accessibilityValue: tab.command,
                     accessibilityHelp: tab.name + "\n" + tab.command
                 )
+            case .devtools(let tab):
+                return TabStripItem(
+                    id: tab.id,
+                    title: tab.displayTitle,
+                    badgeLetter: "",
+                    badgeHex: "",
+                    favicon: nil,
+                    selected: tab.id == selectedID,
+                    groupMember: grouped,
+                    splitGlyph: grouped ? glyph : nil,
+                    memberCount: grouped ? count : 0,
+                    kind: .devtools,
+                    titlePrefix: "DevTools:",
+                    pageTitle: tab.pageTitle,
+                    partnerID: tab.sourceID,
+                    devtoolsTile: true,
+                    accessibilityLabel: tab.accessibilityLabel
+                )
             }
+        }
+        return linkingDevToolsPartners(rows)
+    }
+
+    private func stripGlyph() -> IconGlyph? {
+        switch tiles.layout?.arrangement?.stripGlyph {
+        case .twoColumns: return .split2
+        case .threeColumns: return .split3
+        case .grid: return .splitGrid
+        case nil: return nil
         }
     }
 
     private func removeSession(id: UUID) {
+        let closingSource = session.contains { item in
+            if case .web(let tab) = item { return tab.id == id }
+            return false
+        }
+        if closingSource {
+            for controller in browserWindows() where controller !== self {
+                controller.closePartnerDevTools(sourceID: id)
+            }
+        }
+        if let tools = devToolsTab(forSource: id) {
+            tools.shutdown()
+            tools.container.removeFromSuperview()
+            session.removeAll { $0.id == tools.id }
+            _ = tiles.remove(tabID: tools.id)
+            devToolsHiddenAt[id] = nil
+            devToolsMemory[id] = nil
+        }
+        if let parked = suspendedDevTools.removeValue(forKey: id) {
+            parked.shutdown()
+            parked.container.removeFromSuperview()
+            devToolsHiddenAt[id] = nil
+        }
         guard let index = session.firstIndex(where: { $0.id == id }) else { return }
         if case .web = session[index], mediaPromptTabID == id {
             dismissMediaPrompt(grant: false)
         }
+        let closingDevToolsSource = devToolsSourceID(of: session[index])
         switch session[index] {
         case .web(let tab):
+            removeStandby(tab.id)
             tab.shutdown()
         case .terminal(let tab):
             tab.shutdown()
+        case .devtools(let tab):
+            tab.finishRemoval()
         }
         let closingActive = session[index].id == activeID
+        let closedID = session[index].id
         session.remove(at: index)
+        var preferred = tiles.remove(tabID: closedID)
+        if let closingDevToolsSource, session.contains(where: { $0.id == closingDevToolsSource }) {
+            preferred = closingDevToolsSource
+        }
         if session.isEmpty {
             closeConfirmed = true
             window?.close()
             return
         }
         if closingActive {
-            let nextIndex = min(index, session.count - 1)
-            var chosen = session[nextIndex]
-            if !settings.settings.tabVisibility.allows(chosen.kind) {
-                let after = session.dropFirst(nextIndex).first { settings.settings.tabVisibility.allows($0.kind) }
-                let before = session.prefix(nextIndex).last { settings.settings.tabVisibility.allows($0.kind) }
-                if let after {
-                    chosen = after
-                } else if let before {
-                    chosen = before
+            if let preferred, session.contains(where: { $0.id == preferred }),
+               settings.settings.tabVisibility.allows(sessionKind(id: preferred)) {
+                activateTab(id: preferred, switching: true)
+            } else {
+                let nextIndex = min(index, session.count - 1)
+                var chosen = session[nextIndex]
+                if !settings.settings.tabVisibility.allows(chosen.kind) {
+                    let after = session.dropFirst(nextIndex).first { settings.settings.tabVisibility.allows($0.kind) }
+                    let before = session.prefix(nextIndex).last { settings.settings.tabVisibility.allows($0.kind) }
+                    if let after {
+                        chosen = after
+                    } else if let before {
+                        chosen = before
+                    }
                 }
+                activateTab(id: chosen.id, switching: true)
             }
-            activateTab(id: chosen.id, switching: true)
         }
         syncBars(progressOnly: false)
         noteSessionChange()
+        if !session.isEmpty {
+            focusPaneContentIfNeeded()
+        }
     }
 
     private func confirmCloseTerminal(then close: @escaping () -> Void) {
@@ -1871,11 +2509,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
     }
 
-    /// The command is shown in full. Cancel leaves the tab in place and does not start a process.
+    /// Shell, working directory, and command are shown. The stored hash stays the command
+    /// alone so an older bookmark file still matches. Cancel does not start a process.
     private func confirmRun(_ terminal: TerminalTab) {
         let alert = NSAlert()
         alert.messageText = "Run this command?"
-        alert.informativeText = terminal.command
+        alert.informativeText = TerminalLaunch.confirmationText(
+            command: terminal.command,
+            shell: terminal.shell,
+            workingDirectory: terminal.workingDirectory
+        )
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Run")
         alert.addButton(withTitle: "Cancel")
@@ -1888,7 +2531,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
     }
 
-    private func tabItem(for tab: BrowserTab, selected: Bool) -> TabStripItem {
+    private func tabItem(
+        for tab: BrowserTab,
+        selected: Bool,
+        groupMember: Bool,
+        splitGlyph: IconGlyph?,
+        memberCount: Int
+    ) -> TabStripItem {
         switch tab.surface {
         case .newTab:
             return TabStripItem(
@@ -1897,7 +2546,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 badgeLetter: "+",
                 badgeHex: SiteBadge.newTabHex,
                 favicon: nil,
-                selected: selected
+                selected: selected,
+                groupMember: groupMember,
+                splitGlyph: splitGlyph,
+                memberCount: memberCount
             )
         case .bookmarks:
             return TabStripItem(
@@ -1906,7 +2558,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 badgeLetter: "B",
                 badgeHex: SiteBadge.listHex,
                 favicon: nil,
-                selected: selected
+                selected: selected,
+                groupMember: groupMember,
+                splitGlyph: splitGlyph,
+                memberCount: memberCount
             )
         case .web:
             let host = tab.displayedURL?.host ?? ""
@@ -1917,12 +2572,912 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 badgeLetter: SiteBadge.letter(forTitle: source),
                 badgeHex: SiteBadge.colorHex(forHost: host),
                 favicon: tab.favicon,
-                selected: selected
+                selected: selected,
+                groupMember: groupMember,
+                splitGlyph: splitGlyph,
+                memberCount: memberCount
             )
         }
     }
 
+    /// The pane to show after a close. A split prefers the layout's next pane; otherwise the strip neighbor.
+    private func resolvedCloseTarget(preferred: UUID?, index: Int) -> UUID {
+        if let preferred, session.contains(where: { $0.id == preferred }) {
+            return preferred
+        }
+        let next = min(index, session.count - 1)
+        return session[next].id
+    }
+
+    private func sessionKind(id: UUID) -> TabKind {
+        session.first(where: { $0.id == id })?.kind ?? .web
+    }
+
+    private func showSplit(focus id: UUID) {
+        tiles.focus(id)
+        webContainer.isHidden = true
+        terminalHost.isHidden = true
+        bookmarksPage.isHidden = true
+        newTabPage.isHidden = true
+        tiles.present()
+        orderSplitSurfaces()
+    }
+
+    /// Puts the canvas above another visible page surface without covering the toast or the drop preview.
+    /// Hidden siblings do not occlude, so they are not a reason to reparent.
+    private func orderSplitSurfaces() {
+        let canvas = tiles.canvas
+        guard let host = canvas.superview,
+              let index = host.subviews.firstIndex(where: { $0 === canvas }) else { return }
+        let covers = host.subviews[(index + 1)...].contains { view in
+            if view === splitToast { return false }
+            if let preview = dragPreview, view === preview { return false }
+            if view.isHidden || view.alphaValue < 0.01 { return false }
+            return true
+        }
+        guard covers else { return }
+        if splitToast.superview === host {
+            host.addSubview(canvas, positioned: .below, relativeTo: splitToast)
+        } else if HostedViewPlacement.shouldRaise(
+            isChildOfTarget: true,
+            isFrontmost: host.subviews.last === canvas
+        ) {
+            host.addSubview(canvas)
+        }
+    }
+
+    /// Keeps the saved layout while a non-member tab is showing, and puts shared pages back on the page host.
+    private func applyTileVisibility() {
+        let ids = Set(session.map(\.id))
+        panePages = panePages.filter { ids.contains($0.key) }
+        paneBookmarkPages = paneBookmarkPages.filter { ids.contains($0.key) }
+        styledToken = styledToken.filter { ids.contains($0.key) }
+        healthArchive.prune(keeping: ids)
+        tiles.prune(keeping: ids)
+        tiles.stampKinds { id in
+            guard session.contains(where: { $0.id == id }) else { return nil }
+            return sessionKind(id: id)
+        }
+        updateTileWindowMinSize()
+        guard let id = activeID, tiles.isSplitVisible(activeID: id) else {
+            let wasShowing = !tiles.canvas.isHidden
+            tiles.release()
+            rehomeSharedPages()
+            if wasShowing {
+                embedSoloSurface()
+            }
+            parkInactiveDevTools()
+            attachVisibleDevTools()
+            if tiles.canvas.consumeStructureChange() {
+                focusPaneContentIfNeeded()
+            }
+            syncSplitChrome()
+            return
+        }
+        showSplit(focus: id)
+        parkInactiveDevTools()
+        attachVisibleDevTools()
+        reloadVisiblePanePages()
+        if tiles.canvas.consumeStructureChange() {
+            focusPaneContentIfNeeded()
+        }
+        syncSplitChrome()
+    }
+
+    private func rehomeSharedPages() {
+        adoptInPageHost(bookmarksPage)
+        adoptInPageHost(newTabPage)
+    }
+
+    private func adoptInPageHost(_ view: NSView) {
+        guard view.superview !== pageHost else { return }
+        view.removeFromSuperview()
+        pageHost.addSubview(view)
+        pinToEdges(view)
+    }
+
+    private func tileContent(id: UUID, focused _: Bool) -> TilePanePresentation? {
+        guard let item = session.first(where: { $0.id == id }) else { return nil }
+        switch item {
+        case .terminal(let tab):
+            let size = CGFloat(settings.settings.terminalFontSize)
+            if tab.fontSize != size || styledToken[id] != tileStyleToken {
+                tab.fontSize = size
+                tab.applyColors()
+                styledToken[id] = tileStyleToken
+            }
+            let host = TilePaneHost(view: tab.view, title: tab.name, focus: tab.view, kind: .terminal)
+            return TilePanePresentation(
+                content: host,
+                insets: NSEdgeInsets(top: 18, left: 22, bottom: 18, right: 22),
+                fill: .terminal
+            )
+        case .web(let tab):
+            switch tab.surface {
+            case .web:
+                if styledToken[id] != tileStyleToken {
+                    tab.webView.underPageBackgroundColor = Theme.page
+                    styledToken[id] = tileStyleToken
+                }
+                let host = TilePaneHost(view: tab.webView, title: tab.title, focus: tab.webView, kind: .web)
+                return TilePanePresentation(content: host, insets: NSEdgeInsets(), fill: .page)
+            case .newTab:
+                let page = panePage(for: id)
+                page.isHidden = false
+                let host = TilePaneHost(view: page, title: "New Tab", focus: page.inputField, kind: .web)
+                return TilePanePresentation(content: host, insets: NSEdgeInsets(), fill: .page)
+            case .bookmarks:
+                let page = paneBookmarks(for: id)
+                page.isHidden = false
+                let host = TilePaneHost(view: page, title: tab.title, focus: page, kind: .web)
+                return TilePanePresentation(content: host, insets: NSEdgeInsets(), fill: .page)
+            }
+        case .devtools(let tab):
+            tab.container.alphaValue = 1
+            let host = TilePaneHost(
+                view: tab.container,
+                title: tab.accessibilityName,
+                focus: tab.focusTarget,
+                kind: .devtools
+            )
+            return TilePanePresentation(content: host, insets: NSEdgeInsets(), fill: .page, pill: .devtools)
+        }
+    }
+
+    private func panePage(for id: UUID) -> NewTabPageView {
+        if let page = panePages[id] { return page }
+        let page = NewTabPageView(store: bookmarks)
+        page.translatesAutoresizingMaskIntoConstraints = false
+        page.inputField.setAccessibilityIdentifier("wyvern.newtab.pane.\(id.uuidString)")
+        page.onSubmit = { [weak self] text in
+            guard let self else { return }
+            self.activateTab(id: id, switching: false)
+            self.commit(text: text)
+        }
+        page.onOpen = { [weak self] bookmark in
+            guard let self else { return }
+            self.activateTab(id: id, switching: false)
+            self.openBookmark(bookmark)
+        }
+        panePages[id] = page
+        return page
+    }
+
+    private func paneBookmarks(for id: UUID) -> BookmarksPageView {
+        if let page = paneBookmarkPages[id] { return page }
+        let page = BookmarksPageView(store: bookmarks)
+        page.translatesAutoresizingMaskIntoConstraints = false
+        page.onOpen = { [weak self] bookmark in
+            guard let self else { return }
+            self.activateTab(id: id, switching: false)
+            self.openBookmark(bookmark)
+        }
+        page.onImport = { [weak self] in
+            self?.activateTab(id: id, switching: false)
+            self?.presentBookmarkImport()
+        }
+        paneBookmarkPages[id] = page
+        return page
+    }
+
+    private func reloadVisiblePanePages() {
+        for id in tiles.tabIDs() {
+            panePages[id]?.reload()
+            paneBookmarkPages[id]?.reload()
+        }
+    }
+
+    private func focusPaneContent() {
+        guard let window else { return }
+        if let id = activeID, tiles.isSplitVisible(activeID: id),
+           let target = tileContent(id: id, focused: true)?.content?.tileFocusTarget {
+            window.makeFirstResponder(target)
+            return
+        }
+        if let terminal = activeTerminalTab {
+            window.makeFirstResponder(terminal.view)
+            return
+        }
+        if let tools = activeDevToolsTab() {
+            window.makeFirstResponder(tools.focusTarget)
+            return
+        }
+        guard let tab = activeTab else { return }
+        switch tab.surface {
+        case .web:
+            window.makeFirstResponder(tab.webView)
+        case .newTab:
+            window.makeFirstResponder(newTabPage.inputField)
+        case .bookmarks:
+            window.makeFirstResponder(bookmarksPage)
+        }
+    }
+
+    /// Restores keystrokes to the focused pane. An in-progress address-bar edit keeps the field.
+    private func focusPaneContentIfNeeded() {
+        guard !addressField.isEditingURL else { return }
+        focusPaneContent()
+    }
+
+    private func responderIsInsideCanvas() -> Bool {
+        guard let view = window?.firstResponder as? NSView else { return false }
+        var current: NSView? = view
+        while let node = current {
+            if node === tiles.canvas { return true }
+            current = node.superview
+        }
+        return false
+    }
+
+    private func tabContextMenu(for id: UUID) -> NSMenu {
+        if sessionKind(id: id) == .devtools {
+            return devToolsContextMenu(for: id)
+        }
+        let menu = NSMenu()
+        let withCurrent = menuItem("Split with Current Tab", action: #selector(splitWithCurrentTab(_:)), id: id)
+        let right = menuItem("Split Right", action: #selector(splitRight(_:)), id: id)
+        let below = menuItem("Split Below", action: #selector(splitDown(_:)), id: id)
+        menu.addItem(withCurrent)
+        menu.addItem(right)
+        menu.addItem(below)
+        if tiles.hasSavedSplit {
+            let add = menuItem("Add to Split", action: #selector(addToSplit(_:)), id: id)
+            if tiles.tabIDs().count >= TileArrangement.maximumPanes {
+                add.isEnabled = false
+                add.toolTip = "Split View holds up to 4 tabs"
+            } else if tiles.layout?.contains(id) == true {
+                add.isEnabled = false
+            }
+            menu.addItem(add)
+            if tiles.layout?.contains(id) == true {
+                menu.addItem(menuItem("Remove from Split", action: #selector(removeFromSplit(_:)), id: id))
+            }
+        }
+        return menu
+    }
+
+    private func menuItem(_ title: String, action: Selector, id: UUID) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = id
+        return item
+    }
+
+    @objc func splitRight(_ sender: Any?) {
+        performSplit(axis: .horizontal, sender: sender)
+    }
+
+    @objc func splitDown(_ sender: Any?) {
+        performSplit(axis: .vertical, sender: sender)
+    }
+
+    @objc func closePane(_ sender: Any?) {
+        guard tiles.isSplitVisible(activeID: activeID), let id = activeID else { return }
+        closeTab(id: id)
+    }
+
+    @objc func focusNextPane(_ sender: Any?) {
+        focusAdjacentPane(forward: true)
+    }
+
+    @objc func focusPreviousPane(_ sender: Any?) {
+        focusAdjacentPane(forward: false)
+    }
+
+    @objc func equalizePanes(_ sender: Any?) {
+        guard tiles.isSplitVisible(activeID: activeID) else { return }
+        let inside = responderIsInsideCanvas()
+        tiles.equalizeAll()
+        tiles.present()
+        if inside {
+            focusPaneContentIfNeeded()
+        }
+    }
+
+    @objc func unsplit(_ sender: Any?) {
+        performUnsplit()
+    }
+
+    @objc func focusPaneLeft(_ sender: Any?) { moveFocus(toward: .left) }
+    @objc func focusPaneRight(_ sender: Any?) { moveFocus(toward: .right) }
+    @objc func focusPaneUp(_ sender: Any?) { moveFocus(toward: .up) }
+    @objc func focusPaneDown(_ sender: Any?) { moveFocus(toward: .down) }
+    @objc func swapPaneLeft(_ sender: Any?) { swapFocus(toward: .left) }
+    @objc func swapPaneRight(_ sender: Any?) { swapFocus(toward: .right) }
+
+    @objc func applyLayout(_ sender: Any?) {
+        guard let raw = (sender as? NSMenuItem)?.representedObject as? String,
+              let arrangement = TileArrangement(rawValue: raw) else { return }
+        applyArrangement(arrangement)
+    }
+
+    @objc func splitWithCurrentTab(_ sender: Any?) {
+        guard let clicked = (sender as? NSMenuItem)?.representedObject as? UUID,
+              session.contains(where: { $0.id == clicked }) else { return }
+        guard let current = activeID else { return }
+        if clicked == current {
+            performSplit(axis: .horizontal, sender: nil)
+            return
+        }
+        if let layout = tiles.layout, layout.isSplit, !layout.contains(current), !layout.contains(clicked) {
+            return
+        }
+        guard tiles.place(tabID: clicked, beside: current, edge: .right, kind: sessionKind(id: clicked)) else { return }
+        activateTab(id: clicked, switching: false)
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    @objc func addToSplit(_ sender: Any?) {
+        guard let id = (sender as? NSMenuItem)?.representedObject as? UUID else { return }
+        guard let layout = tiles.layout, layout.isSplit, !layout.contains(id) else { return }
+        guard layout.tabIDs().count < TileArrangement.maximumPanes else { return }
+        let anchor = layout.focusedTabID
+        guard tiles.place(tabID: id, beside: anchor, edge: .right, kind: sessionKind(id: id)) else { return }
+        activateTab(id: id, switching: false)
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    @objc func removeFromSplit(_ sender: Any?) {
+        guard let id = (sender as? NSMenuItem)?.representedObject as? UUID else { return }
+        let next = tiles.remove(tabID: id)
+        if activeID == id, let next, session.contains(where: { $0.id == next }) {
+            activateTab(id: next, switching: true)
+        } else if activeID == id {
+            embedActiveSurface()
+        }
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    /// Rolls back tabs created for a split that could not be built, and refreshes the strip and page.
+    private func discardFailedSplitTabs(_ tabs: [BrowserTab], restore previous: UUID?) {
+        let ids = Set(tabs.map(\.id))
+        for tab in tabs {
+            tab.shutdown()
+            panePages[tab.id] = nil
+            paneBookmarkPages[tab.id] = nil
+        }
+        session.removeAll { ids.contains($0.id) }
+        if let previous, session.contains(where: { $0.id == previous }) {
+            activeID = previous
+        } else if let current = activeID, session.contains(where: { $0.id == current }) {
+            // The selection still names a live tab.
+        } else {
+            activeID = session.first?.id
+        }
+        embedActiveSurface()
+        syncBars(progressOnly: false)
+        noteSessionChange()
+    }
+
+    private func performSplit(axis: TileAxis, sender: Any?) {
+        let anchor = (sender as? NSMenuItem)?.representedObject as? UUID ?? activeID
+        guard let anchor, session.contains(where: { $0.id == anchor }) else { return }
+        if let layout = tiles.layout, layout.isSplit, !layout.contains(anchor) {
+            guard layout.tabIDs().count < TileArrangement.maximumPanes else { return }
+            let beside = layout.focusedTabID
+            let edge: TileEdge = axis == .horizontal ? .right : .down
+            guard tiles.place(tabID: anchor, beside: beside, edge: edge, kind: sessionKind(id: anchor)) else { return }
+            activateTab(id: anchor, switching: false)
+            syncBars(progressOnly: false)
+            focusPaneContentIfNeeded()
+            return
+        }
+        let edge: TileEdge = axis == .horizontal ? .right : .down
+        if let layout = tiles.layout, layout.isSplit,
+           layout.expanded(adding: UUID(), beside: anchor, edge: edge) == nil {
+            return
+        }
+        let previous = activeID
+        let tab = addTab(deferPresentation: true)
+        guard tiles.insert(newTab: tab.id, beside: anchor, axis: axis) else {
+            discardFailedSplitTabs([tab], restore: previous)
+            return
+        }
+        tab.show(.newTab)
+        activateTab(id: tab.id, switching: false)
+        syncBars(progressOnly: false)
+        presentActiveTabForBench()
+        BenchMarks.emit("tab-ready")
+        focusLocationField()
+    }
+
+    private func focusAdjacentPane(forward: Bool) {
+        guard tiles.isSplitVisible(activeID: activeID), let id = tiles.focusAdjacent(forward: forward) else { return }
+        let editing = addressField.isEditingURL
+        activateTab(id: id, switching: true)
+        syncBars(progressOnly: false)
+        if !editing {
+            focusPaneContent()
+        }
+    }
+
+    private func moveFocus(toward edge: TileEdge) {
+        guard tiles.isSplitVisible(activeID: activeID), let id = tiles.focus(toward: edge) else { return }
+        let editing = addressField.isEditingURL
+        activateTab(id: id, switching: true)
+        syncBars(progressOnly: false)
+        if !editing {
+            focusPaneContent()
+        }
+    }
+
+    private func swapFocus(toward edge: TileEdge) {
+        guard tiles.isSplitVisible(activeID: activeID), tiles.swap(toward: edge) else { return }
+        tiles.present()
+        syncBars(progressOnly: false)
+    }
+
+    private func performUnsplit() {
+        guard tiles.hasSavedSplit, let focus = activeID else { return }
+        let order = TileStripOrder.placingMembers(
+            session: session.map(\.id),
+            focused: focus,
+            membersInOrder: tiles.tabIDs()
+        )
+        _ = applySessionOrder(order)
+        tiles.unsplit()
+        embedActiveSurface()
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    private func splitViewClicked() {
+        if tiles.isSplitVisible(activeID: activeID) {
+            performUnsplit()
+            return
+        }
+        guard let current = activeID else {
+            _ = addTab()
+            return
+        }
+        if tiles.hasSavedSplit {
+            guard tiles.tabIDs().count < TileArrangement.maximumPanes else { return }
+            let anchor = tiles.layout?.focusedTabID ?? current
+            guard tiles.place(tabID: current, beside: anchor, edge: .right, kind: sessionKind(id: current)) else { return }
+            activateTab(id: current, switching: false)
+            syncBars(progressOnly: false)
+            focusPaneContentIfNeeded()
+            return
+        }
+        if let other = recentOtherTab(besides: current) {
+            guard tiles.place(tabID: other, beside: current, edge: .right, kind: sessionKind(id: other)) else { return }
+            activateTab(id: current, switching: false)
+            syncBars(progressOnly: false)
+            focusPaneContentIfNeeded()
+            return
+        }
+        performSplit(axis: .horizontal, sender: nil)
+    }
+
+    private func showLayoutPopover() {
+        layoutPicker.selected = tiles.layout?.arrangement
+        layoutPopover.show(relativeTo: splitButton.bounds, of: splitButton, preferredEdge: .maxY)
+    }
+
+    private func applyArrangement(_ arrangement: TileArrangement) {
+        guard let focus = activeID else { return }
+        if let layout = tiles.layout, layout.isSplit {
+            let deficit = max(0, arrangement.paneCount - layout.tabIDs().count)
+            if deficit > 0 {
+                let probe = (0..<deficit).map { _ in UUID() }
+                guard layout.converted(to: arrangement, filling: probe) != nil else { return }
+            }
+            var filling: [UUID] = []
+            var created: [BrowserTab] = []
+            for _ in 0..<deficit {
+                let tab = addTab(deferPresentation: true)
+                tab.show(.newTab)
+                filling.append(tab.id)
+                created.append(tab)
+            }
+            guard let next = layout.converted(to: arrangement, filling: filling) else {
+                discardFailedSplitTabs(created, restore: focus)
+                return
+            }
+            tiles.replaceLayout(next)
+            activateTab(id: next.focusedTabID, switching: false)
+            syncBars(progressOnly: false)
+            focusPaneContentIfNeeded()
+            return
+        }
+        var ids = [focus]
+        if let other = recentOtherTab(besides: focus) {
+            ids.append(other)
+        }
+        guard Set(ids).count == ids.count else { return }
+        var created: [BrowserTab] = []
+        while ids.count < arrangement.paneCount {
+            let tab = addTab(deferPresentation: true)
+            tab.show(.newTab)
+            ids.append(tab.id)
+            created.append(tab)
+        }
+        let kinds = ids.map { sessionKind(id: $0) }
+        guard let next = TileLayout.arranged(arrangement, tabs: ids, kinds: kinds, focused: focus) else {
+            discardFailedSplitTabs(created, restore: focus)
+            return
+        }
+        tiles.replaceLayout(next)
+        activateTab(id: focus, switching: false)
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    private func alignStripToTiles() {
+        var changed = false
+        if let id = activeID, tiles.isSplitVisible(activeID: id) {
+            let order = TileStripOrder.placingMembers(
+                session: session.map(\.id),
+                focused: id,
+                membersInOrder: tiles.tabIDs()
+            )
+            if applySessionOrder(order) {
+                changed = true
+            }
+        }
+        if pinDevToolsOrder() {
+            changed = true
+        }
+        if changed {
+            noteSessionChange()
+        }
+    }
+
+    private func applySessionOrder(_ order: [UUID]) -> Bool {
+        let current = session.map(\.id)
+        guard current != order else { return false }
+        var byID: [UUID: SessionTab] = [:]
+        for item in session {
+            byID[item.id] = item
+        }
+        let next = order.compactMap { byID[$0] }
+        guard next.count == session.count else { return false }
+        session = next
+        return true
+    }
+
+    private func recentOtherTab(besides id: UUID) -> UUID? {
+        if let previous = previousActiveID, previous != id, session.contains(where: { $0.id == previous }) {
+            return previous
+        }
+        guard let index = session.firstIndex(where: { $0.id == id }) else { return nil }
+        if index > 0 { return session[index - 1].id }
+        if index + 1 < session.count { return session[index + 1].id }
+        return nil
+    }
+
+    private func updateTileWindowMinSize() {
+        guard let window else { return }
+        let count = tiles.layout?.tabIDs().count ?? 0
+        let minWidth = CGFloat(TileDisplay.requiredContentMinWidth(
+            paneCount: count,
+            splitVisible: tiles.isSplitVisible(activeID: activeID),
+            base: 980,
+            paneMinWidth: Double(MonoMetrics.paneMinWidth),
+            divider: Double(MonoMetrics.dividerHit)
+        ))
+        if let applied = appliedTileContentMinWidth, abs(applied - minWidth) < 0.5 {
+            return
+        }
+        appliedTileContentMinWidth = minWidth
+        if abs(window.contentMinSize.width - minWidth) < 0.5,
+           abs(window.minSize.width - minWidth) < 0.5 {
+            return
+        }
+        let contentHeight = window.contentMinSize.height
+        let frameHeight = window.minSize.height
+        window.contentMinSize = NSSize(width: minWidth, height: contentHeight > 1 ? contentHeight : 640)
+        window.minSize = NSSize(width: minWidth, height: frameHeight > 1 ? frameHeight : 640)
+    }
+
+    private func syncSplitChrome() {
+        let showing = tiles.isSplitVisible(activeID: activeID)
+        splitButton.toolTip = showing ? "Unsplit" : "Split View"
+        splitButton.setAccessibilityLabel(showing ? "Unsplit" : "Split View")
+        splitButton.tint = showing ? Theme.accent : Theme.mute
+        splitButton.fill = .clear
+        // Shortcuts and layout checkmarks live on the shared menu. A background window must not rewrite them.
+        guard window?.isKeyWindow == true else { return }
+        if let main = NSApp.mainMenu {
+            walkMenu(main) { item in
+                if item.action == #selector(splitRight(_:)) {
+                    item.keyEquivalent = showing ? "" : "\\"
+                    item.keyEquivalentModifierMask = [.command, .control]
+                } else if item.action == #selector(unsplit(_:)) {
+                    item.keyEquivalent = showing ? "\\" : ""
+                    item.keyEquivalentModifierMask = [.command, .control]
+                } else if item.action == #selector(applyLayout(_:)),
+                          let raw = item.representedObject as? String,
+                          let arrangement = TileArrangement(rawValue: raw) {
+                    item.state = tiles.layout?.arrangement == arrangement ? .on : .off
+                }
+            }
+        }
+        announcePaneFocusIfNeeded()
+    }
+
+    private func walkMenu(_ menu: NSMenu, visit: (NSMenuItem) -> Void) {
+        for item in menu.items {
+            visit(item)
+            if let submenu = item.submenu {
+                walkMenu(submenu, visit: visit)
+            }
+        }
+    }
+
+    private func announcePaneFocusIfNeeded() {
+        guard let id = activeID, tiles.isSplitVisible(activeID: id), let layout = tiles.layout else {
+            announcedPaneID = nil
+            return
+        }
+        guard announcedPaneID != id else { return }
+        announcedPaneID = id
+        let place = layout.spokenPlace(of: id)
+        let message = "Focused \(place), \(announcementName(id: id))"
+        NSAccessibility.post(element: tiles.canvas, notification: .announcementRequested, userInfo: [
+            .announcement: message as NSString
+        ])
+    }
+
+    private func announcementName(id: UUID) -> String {
+        guard let item = session.first(where: { $0.id == id }) else { return "pane" }
+        switch item {
+        case .web(let tab):
+            if let host = tab.displayedURL?.host, !host.isEmpty {
+                return host
+            }
+            return tab.surface == .newTab ? "New Tab" : tab.title
+        case .terminal(let tab):
+            return tab.name
+        case .devtools(let tab):
+            return tab.accessibilityName
+        }
+    }
+
+    private struct TileDropTarget {
+        var anchor: UUID
+        var edge: TileEdge
+        var previewRect: NSRect
+        var caption: String
+    }
+
+    private func updateTileDrag(tabID: UUID, screenPoint: NSPoint) {
+        if tileDragCancelled { return }
+        installTileDragMonitor()
+        guard let target = tileDropTarget(at: screenPoint, dragging: tabID), tileDropCanApply(tabID: tabID, target: target) else {
+            hideDropPreview()
+            return
+        }
+        let key = "\(tabID.uuidString)|\(target.anchor.uuidString)|\(target.edge.rawValue)"
+        pendingPreviewRect = target.previewRect
+        pendingPreviewCaption = target.caption
+        if key == dragPreviewKey {
+            dragPreview?.frame = target.previewRect
+            dragPreview?.caption = target.caption
+            return
+        }
+        hideDropPreview()
+        dragPreviewKey = key
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if reduced {
+            showDropPreview(rect: target.previewRect, caption: target.caption, animated: false)
+            return
+        }
+        let timer = Timer(timeInterval: 0.15, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.dragPreviewKey == key else { return }
+                self.showDropPreview(rect: self.pendingPreviewRect, caption: self.pendingPreviewCaption, animated: true)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dragPreviewTimer = timer
+    }
+
+    private func installTileDragMonitor() {
+        guard tileDragMonitor == nil else { return }
+        tileDragMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self else { return event }
+                if event.keyCode == 53 {
+                    self.tileDragCancelled = true
+                    self.tabRegion.cancelTabDrags()
+                    self.endTileDragChrome()
+                    return nil
+                }
+                return event
+            }
+        }
+    }
+
+    private func endTileDragChrome() {
+        hideDropPreview()
+        if let monitor = tileDragMonitor {
+            NSEvent.removeMonitor(monitor)
+            tileDragMonitor = nil
+        }
+    }
+
+    private func hideDropPreview() {
+        dragPreviewTimer?.invalidate()
+        dragPreviewTimer = nil
+        dragPreviewKey = nil
+        dragPreview?.isHidden = true
+        dragPreview?.removeFromSuperview()
+    }
+
+    private func showDropPreview(rect: NSRect, caption: String = "", animated: Bool) {
+        let preview = dragPreview ?? TileDropPreview(frame: rect)
+        dragPreview = preview
+        preview.caption = caption
+        preview.frame = rect
+        if preview.superview !== pageHost {
+            pageHost.addSubview(preview, positioned: .above, relativeTo: tiles.canvas)
+        }
+        preview.isHidden = false
+        if animated {
+            preview.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                preview.animator().alphaValue = 1
+            }
+        } else {
+            preview.alphaValue = 1
+        }
+    }
+
+    private func pageContains(_ screenPoint: NSPoint) -> Bool {
+        guard let window else { return false }
+        let local = pageHost.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        return pageHost.bounds.contains(local)
+    }
+
+    private func tileDropTarget(at screenPoint: NSPoint, dragging tabID: UUID) -> TileDropTarget? {
+        guard let window else { return nil }
+        let local = pageHost.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        guard pageHost.bounds.contains(local) else { return nil }
+        let allowTop = sessionKind(id: tabID) == .devtools
+        if tiles.isSplitVisible(activeID: activeID) {
+            for (id, frame) in tiles.canvas.paneFrames() {
+                let inPage = tiles.canvas.convert(frame, to: pageHost)
+                if inPage.contains(local), let edge = dropEdge(in: inPage, point: local, allowTop: allowTop) {
+                    let caption = devToolsDropCaption(dragging: tabID, anchor: id, edge: edge)
+                    return TileDropTarget(
+                        anchor: id,
+                        edge: edge,
+                        previewRect: dropPreviewRect(in: inPage, edge: edge),
+                        caption: caption
+                    )
+                }
+            }
+            return nil
+        }
+        // A hidden saved split is left in place. Previewing an edge here would anchor on the
+        // active tab, which is not a member, and the drop would be ignored.
+        if tiles.hasSavedSplit {
+            return nil
+        }
+        guard let anchor = activeID, let edge = dropEdge(in: pageHost.bounds, point: local, allowTop: allowTop) else { return nil }
+        return TileDropTarget(
+            anchor: anchor,
+            edge: edge,
+            previewRect: dropPreviewRect(in: pageHost.bounds, edge: edge),
+            caption: devToolsDropCaption(dragging: tabID, anchor: anchor, edge: edge)
+        )
+    }
+
+
+    /// False when the drop would be ignored: a hidden saved split, or an edge 1+2 cannot grow.
+    private func tileDropCanApply(tabID: UUID, target: TileDropTarget) -> Bool {
+        guard let layout = tiles.layout, layout.isSplit else { return true }
+        guard layout.contains(target.anchor) else { return false }
+        if tabID != target.anchor, layout.contains(tabID) {
+            return true
+        }
+        let incoming: UUID
+        if tabID == target.anchor {
+            if let other = recentOtherTab(besides: tabID), !layout.contains(other) {
+                incoming = other
+            } else if recentOtherTab(besides: tabID) == nil {
+                incoming = UUID()
+            } else {
+                return true
+            }
+        } else {
+            incoming = tabID
+        }
+        return layout.expanded(adding: incoming, beside: target.anchor, edge: target.edge) != nil
+    }
+
+    private func dropEdge(in rect: NSRect, point: NSPoint, allowTop: Bool = false) -> TileEdge? {
+        guard rect.width > 1, rect.height > 1 else { return nil }
+        if point.x <= rect.minX + rect.width * 0.25 { return .left }
+        if point.x >= rect.maxX - rect.width * 0.25 { return .right }
+        if allowTop, point.y >= rect.maxY - rect.height * 0.25 { return .up }
+        if point.y <= rect.minY + rect.height * 0.25 { return .down }
+        return nil
+    }
+
+    private func dropPreviewRect(in rect: NSRect, edge: TileEdge) -> NSRect {
+        switch edge {
+        case .left:
+            return NSRect(x: rect.minX, y: rect.minY, width: rect.width / 2, height: rect.height)
+        case .right:
+            return NSRect(x: rect.midX, y: rect.minY, width: rect.width / 2, height: rect.height)
+        case .down:
+            return NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: rect.height / 2)
+        case .up:
+            return NSRect(x: rect.minX, y: rect.midY, width: rect.width, height: rect.height / 2)
+        }
+    }
+
+    private func performTileDrop(tabID: UUID, target: TileDropTarget) {
+        if sessionKind(id: tabID) == .devtools {
+            let source = devToolsTab(id: tabID)?.sourceID
+            let onPage = target.anchor == source || target.anchor == tabID
+            if onPage, let source {
+                let side = DevToolsSide(edge: target.edge)
+                guard tiles.placeDevTools(
+                    devtools: tabID,
+                    beside: source,
+                    side: side,
+                    pageFraction: DevToolsPlacement.pageFraction
+                ) else { return }
+                rememberDevToolsPair(source: source, devtools: tabID)
+                announcedPaneID = tabID
+                activateTab(id: tabID, switching: false)
+                syncBars(progressOnly: false)
+                announce(side.moveAnnouncement)
+                focusPaneContentIfNeeded()
+                return
+            }
+        }
+        let axis: TileAxis = (target.edge == .up || target.edge == .down) ? .vertical : .horizontal
+        if tabID == target.anchor {
+            if let other = recentOtherTab(besides: tabID) {
+                guard tiles.place(tabID: other, beside: tabID, edge: target.edge, kind: sessionKind(id: other)) else { return }
+                activateTab(id: tabID, switching: false)
+            } else {
+                if let layout = tiles.layout, layout.isSplit {
+                    guard layout.contains(tabID) else { return }
+                    guard layout.expanded(adding: UUID(), beside: tabID, edge: target.edge) != nil else { return }
+                }
+                let previous = activeID
+                let tab = addTab(deferPresentation: true)
+                guard tiles.insert(newTab: tab.id, beside: tabID, axis: axis) else {
+                    discardFailedSplitTabs([tab], restore: previous)
+                    return
+                }
+                tab.show(.newTab)
+                activateTab(id: tab.id, switching: false)
+                syncBars(progressOnly: false)
+                focusLocationField()
+                return
+            }
+        } else {
+            guard tiles.place(tabID: tabID, beside: target.anchor, edge: target.edge, kind: sessionKind(id: tabID)) else { return }
+            activateTab(id: tabID, switching: false)
+        }
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    private func removeFromSplitIfDroppedOutside(tabID: UUID, visibleIndex: Int) {
+        guard let layout = tiles.layout, layout.contains(tabID) else { return }
+        let members = Set(layout.tabIDs())
+        let visible = visibleSession()
+        let indexes = visible.enumerated().compactMap { members.contains($0.element.id) ? $0.offset : nil }
+        guard let first = indexes.min(), let last = indexes.max() else { return }
+        if visibleIndex < first || visibleIndex > last + 1 {
+            _ = tiles.remove(tabID: tabID)
+        }
+    }
+
     private func commit(text: String) {
+        if activeDevToolsTab() != nil { return }
         guard let tab = activeTab else { return }
         let engine = settings.settings.resolvedSearchEngine()
         guard let url = InputResolver(engine: engine).resolve(text) else { return }
@@ -1944,7 +3499,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         completion: @escaping (Bool) -> Void
     ) {
         dismissMediaPrompt(grant: false)
-        let prompt = MediaPermissionPromptController(origin: origin, kind: kind)
+        // Name the tab's top-level page. The stored choice stays on the requester origin.
+        let named = MediaPermissionPolicy.sheetOrigin(
+            topLevelURL: tab.webView.url ?? tab.displayedURL,
+            requesterOrigin: origin
+        )
+        let prompt = MediaPermissionPromptController(origin: named, kind: kind)
         mediaPrompt = prompt
         mediaPromptTabID = tab.id
         prompt.onChoice = { [weak self] choice in
@@ -2089,6 +3649,199 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     @objc private func reloadTapped() { reloadOrStop() }
     @objc private func sidebarTapped() { showBookmarks() }
 
+    private func applyBlockListChange(_ note: Notification) {
+        let rulesChanged = note.userInfo?["rulesChanged"] as? Bool ?? false
+        if rulesChanged {
+            for item in session {
+                if case .web(let tab) = item {
+                    tab.installCookieRules()
+                }
+            }
+            applyWebPageMetrics()
+        }
+        if blockPopover.isShown {
+            refreshBlockPopover()
+        }
+        syncBars(progressOnly: false)
+    }
+
+    /// Right-side cluster. Kept as a hook for callers that change badge visibility.
+    private func syncRightCluster() {
+        // The toolbar cluster is an NSStackView with detachesHiddenViews, so hidden badges drop out.
+        toolbarCluster.needsLayout = true
+    }
+
+    /// The page the blocked-count badge describes.
+    /// A visible split uses the focused pane, even when the strip's selected tab is different.
+    private enum BlockBadgeSubject {
+        case web(BrowserTab)
+        case terminal
+        case strip(BrowserTab?)
+    }
+
+    private func blockBadgeSubject() -> BlockBadgeSubject {
+        if tiles.isSplitVisible(activeID: activeID),
+           let focus = tiles.layout?.focusedTabID,
+           let item = session.first(where: { $0.id == focus }) {
+            switch item {
+            case .terminal:
+                return .terminal
+            case .web(let tab):
+                return .web(tab)
+            case .devtools:
+                // A DevTools pane has no page of its own. Hide the badge, like a terminal.
+                return .terminal
+            }
+        }
+        if activeTerminalTab != nil {
+            return .terminal
+        }
+        return .strip(activeTab)
+    }
+
+    private func syncBlockBadgeForFocusedPane() {
+        switch blockBadgeSubject() {
+        case .terminal:
+            syncBlockBadge(url: nil, count: 0, terminal: true, tab: nil)
+        case .web(let tab):
+            syncBlockBadge(
+                url: tab.displayedURL,
+                count: tab.blockedRequestCount,
+                terminal: false,
+                tab: tab
+            )
+        case .strip(let tab):
+            syncBlockBadge(
+                url: tab?.displayedURL,
+                count: tab?.blockedRequestCount ?? 0,
+                terminal: false,
+                tab: tab
+            )
+        }
+    }
+
+    private func reloadBlockBadgeTab() {
+        let tab: BrowserTab?
+        switch blockBadgeSubject() {
+        case .web(let focused):
+            tab = focused
+        case .strip(let focused):
+            tab = focused
+        case .terminal:
+            tab = nil
+        }
+        guard let tab, tab.surface == .web else { return }
+        tab.webView.reload()
+    }
+
+    private func syncBlockBadge(url: URL?, count: Int, terminal: Bool, tab: BrowserTab?) {
+        let show = blockBadgeShouldShow(terminal: terminal, tab: tab)
+        blockBadge.setAccessibilityElement(show)
+        if show == false {
+            blockBadge.isHidden = true
+            blockWidth?.constant = CGFloat(
+                BlockedBadgeVisibility.constraintWidth(visible: false, preferredWidth: 0)
+            )
+            if blockPopover.isShown {
+                blockPopover.performClose(nil)
+            }
+            syncRightCluster()
+            return
+        }
+        let controller = BlockListController.shared
+        let host = BlockListController.displayHost(url)
+        let look: BlockedCountBadge.Look
+        if controller.blockingEnabled == false {
+            look = .disabled
+        } else if controller.siteToggleEnabled(host: host), controller.blocksSite(host: host) == false {
+            look = .paused
+        } else if count <= 0 {
+            look = .zero
+        } else {
+            look = .active
+        }
+        blockBadge.apply(count: count, host: host, look: look)
+        // Width first: detachesHiddenViews reattaches at the current constraint. Zero-width unhide stays collapsed.
+        blockWidth?.constant = CGFloat(
+            BlockedBadgeVisibility.constraintWidth(
+                visible: true,
+                preferredWidth: Double(blockBadge.preferredWidth)
+            )
+        )
+        blockBadge.isHidden = false
+        if blockPopover.isShown {
+            refreshBlockPopover()
+        }
+        syncRightCluster()
+    }
+
+    private func blockBadgeShouldShow(terminal: Bool, tab: BrowserTab?) -> Bool {
+        BlockedBadgeVisibility.shouldShow(
+            blockingEnabled: BlockListController.shared.blockingEnabled,
+            showBlockedCount: BlockListController.shared.showBlockedCount,
+            isTerminal: terminal,
+            isWebSurface: tab?.surface == .web,
+            scheme: tab?.displayedURL?.scheme
+        )
+    }
+
+    @objc private func blockBadgeTapped() {
+        if blockPopover.isShown {
+            blockPopover.performClose(nil)
+            return
+        }
+        guard blockBadge.isHidden == false else { return }
+        refreshBlockPopover()
+        blockPopover.show(relativeTo: blockBadge.bounds, of: blockBadge, preferredEdge: .maxY)
+        blockBadge.extraAccessibilityChild = blockPopoverController.view
+    }
+
+    private func setFocusedSitePaused(_ paused: Bool) {
+        let tab: BrowserTab?
+        switch blockBadgeSubject() {
+        case .web(let focused):
+            tab = focused
+        case .strip(let focused):
+            tab = focused
+        case .terminal:
+            tab = nil
+        }
+        guard let tab else { return }
+        let host = BlockListController.displayHost(tab.displayedURL)
+        guard let host else {
+            refreshBlockPopover()
+            return
+        }
+        BlockListController.shared.setBlocksSite(host: host, blocked: paused == false) { [weak self] ok in
+            self?.blockPopoverController.noteUserChange(success: ok)
+            self?.refreshBlockPopover()
+        }
+    }
+
+    private func refreshBlockPopover() {
+        let tab: BrowserTab?
+        switch blockBadgeSubject() {
+        case .web(let focused):
+            tab = focused
+        case .strip(let focused):
+            tab = focused
+        case .terminal:
+            tab = nil
+        }
+        let host = BlockListController.displayHost(tab?.displayedURL)
+        let controller = BlockListController.shared
+        let paused = controller.blockingEnabled
+            && controller.siteToggleEnabled(host: host)
+            && controller.blocksSite(host: host) == false
+        blockPopoverController.apply(
+            host: host,
+            count: blockedCountForFocusedTab(tab),
+            blockingEnabled: controller.blockingEnabled,
+            paused: paused,
+            canPause: controller.siteToggleEnabled(host: host)
+        )
+    }
+
     @objc private func downloadsTapped() {
         if downloadsPopover.isShown {
             downloadsPopover.performClose(nil)
@@ -2111,11 +3864,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func syncDownloadsButton() {
         let items = DownloadManager.shared.items
         let visible = !items.isEmpty
-        downloadsButton.isHidden = !visible
-        downloadsWidth?.constant = visible ? MonoMetrics.control : 0
-        downloadsGap?.isActive = visible
-        healthToAddressGap?.isActive = !visible
+        let width = CGFloat(BlockedBadgeVisibility.constraintWidth(
+            visible: visible,
+            preferredWidth: Double(MonoMetrics.control)
+        ))
+        // Width first. detachesHiddenViews reattaches at the current constant, so un-hiding at 0 collapses the button.
+        if visible {
+            downloadsWidth?.constant = width
+            downloadsButton.isHidden = false
+        } else {
+            downloadsButton.isHidden = true
+            downloadsWidth?.constant = width
+        }
         downloadsButton.tint = DownloadManager.shared.hasActiveDownload ? Theme.accent : Theme.mute
+        syncRightCluster()
         if !visible, downloadsPopover.isShown {
             downloadsPopover.performClose(nil)
         }
@@ -2134,6 +3896,987 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 }
             }
         }
+    }
+
+    // MARK: DevTools tab
+
+    private func webTab(id: UUID) -> BrowserTab? {
+        for item in session {
+            if case .web(let tab) = item, tab.id == id {
+                return tab
+            }
+        }
+        return nil
+    }
+
+    private func webTabInAnyWindow(id: UUID) -> BrowserTab? {
+        if let tab = webTab(id: id) {
+            return tab
+        }
+        for controller in browserWindows() where controller !== self {
+            if let tab = controller.webTab(id: id) {
+                return tab
+            }
+        }
+        return nil
+    }
+
+    private func browserWindows() -> [BrowserWindowController] {
+        var seen = Set<ObjectIdentifier>()
+        var result: [BrowserWindowController] = []
+        for window in NSApp.windows {
+            guard let controller = window.windowController as? BrowserWindowController else { continue }
+            if seen.insert(ObjectIdentifier(controller)).inserted {
+                result.append(controller)
+            }
+        }
+        return result
+    }
+
+    private func windowHosting(tab id: UUID) -> BrowserWindowController? {
+        if session.contains(where: { $0.id == id }) {
+            return self
+        }
+        return browserWindows().first { $0.session.contains(where: { $0.id == id }) }
+    }
+
+    private func activeDevToolsTab() -> DevToolsTab? {
+        guard let activeID else { return nil }
+        return devToolsTab(id: activeID)
+    }
+
+    private func devToolsTab(id: UUID) -> DevToolsTab? {
+        for item in session {
+            if case .devtools(let tab) = item, tab.id == id {
+                return tab
+            }
+        }
+        return nil
+    }
+
+    private func devToolsTab(forSource id: UUID) -> DevToolsTab? {
+        for item in session {
+            if case .devtools(let tab) = item, tab.sourceID == id {
+                return tab
+            }
+        }
+        return nil
+    }
+
+    private func devToolsSourceID(of item: SessionTab) -> UUID? {
+        if case .devtools(let tab) = item {
+            return tab.sourceID
+        }
+        return nil
+    }
+
+    /// On screen: the DevTools tab is selected, or it sits in the split that is showing.
+    private func devToolsIsShowing(_ tools: DevToolsTab) -> Bool {
+        if activeID == tools.id {
+            return true
+        }
+        guard tiles.isSplitVisible(activeID: activeID), let layout = tiles.layout else { return false }
+        return layout.contains(tools.id)
+    }
+
+    private func devToolsTabAnywhere(sourceID: UUID) -> DevToolsTab? {
+        if let tools = devToolsTab(forSource: sourceID) {
+            return tools
+        }
+        for controller in browserWindows() where controller !== self {
+            if let tools = controller.devToolsTab(forSource: sourceID) {
+                return tools
+            }
+        }
+        return nil
+    }
+
+    func toggleWebInspector(_ sender: Any?) {
+        _ = sender
+        if let tools = activeDevToolsTab() {
+            closeTab(id: tools.id)
+            return
+        }
+        guard let source = focusedWebInspectorTarget() else { return }
+        if let tools = devToolsTab(forSource: source.id) {
+            if devToolsIsShowing(tools) {
+                closeTab(id: tools.id)
+            } else {
+                revealDevTools(tools, afterReveal: nil)
+            }
+            return
+        }
+        for controller in browserWindows() where controller !== self {
+            if let tools = controller.devToolsTab(forSource: source.id) {
+                _ = controller.focusTab(id: tools.id)
+                return
+            }
+        }
+        openDevTools(for: source, afterReveal: nil)
+    }
+
+    func startElementSelection(_ sender: Any?) {
+        _ = sender
+        guard let source = focusedWebInspectorTarget() else { return }
+        openOrFocusDevTools(for: source) { tools in
+            tools.toggleElementSelection()
+        }
+    }
+
+    func showJavaScriptConsole(_ sender: Any?) {
+        _ = sender
+        guard let source = focusedWebInspectorTarget() else { return }
+        openOrFocusDevTools(for: source) { tools in
+            _ = tools.focusConsole()
+        }
+    }
+
+    private func openOrFocusDevTools(for source: BrowserTab, after: @escaping (DevToolsTab) -> Void) {
+        if let tools = devToolsTab(forSource: source.id) {
+            if activeID == tools.id {
+                after(tools)
+            } else {
+                revealDevTools(tools) { after(tools) }
+            }
+            return
+        }
+        for controller in browserWindows() where controller !== self {
+            if let tools = controller.devToolsTab(forSource: source.id) {
+                _ = controller.focusTab(id: tools.id)
+                after(tools)
+                return
+            }
+        }
+        openDevTools(for: source) { [weak self] in
+            guard let self else { return }
+            if let tools = self.devToolsTabAnywhere(sourceID: source.id) {
+                after(tools)
+            }
+        }
+    }
+
+    private func revealDevTools(_ tools: DevToolsTab, afterReveal: (() -> Void)?) {
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        announcedPaneID = tools.id
+        activateTab(id: tools.id, switching: true)
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+        afterReveal?()
+    }
+
+    private func openDevTools(for source: BrowserTab, afterReveal: (() -> Void)?) {
+        if let existing = devToolsTab(forSource: source.id) {
+            revealDevTools(existing, afterReveal: afterReveal)
+            return
+        }
+        for controller in browserWindows() where controller !== self {
+            if let existing = controller.devToolsTab(forSource: source.id) {
+                _ = controller.focusTab(id: existing.id)
+                afterReveal?()
+                return
+            }
+        }
+        inspectionOpenInFlight.insert(source.id)
+        let tools: DevToolsTab
+        if let parked = takeSuspended(sourceID: source.id) {
+            tools = parked
+            configure(tools, source: source)
+        } else {
+            let host = takeStandbyHost(sourceID: source.id) ?? WebInspectorHost()
+            tools = DevToolsTab(source: source, host: host)
+            configure(tools, source: source)
+        }
+        let insertAt = (session.firstIndex(where: { $0.id == source.id }) ?? (session.count - 1)) + 1
+        let clamped = min(max(insertAt, 0), session.count)
+        session.insert(.devtools(tools), at: clamped)
+        let memory = devToolsMemory[source.id]
+        if memory?.windowed == true, relocateDevToolsToNewWindow(id: tools.id) {
+            inspectionOpenInFlight.remove(source.id)
+            announce("Opened DevTools for \(tools.pageTitle), window")
+            afterReveal?()
+            return
+        }
+        if memory?.poppedOut == true {
+            finishOpen(tools, spoken: "tab", afterReveal: afterReveal)
+            return
+        }
+        if let memory {
+            let placed = placeDevToolsResolved(
+                tools: tools,
+                sourceID: source.id,
+                side: memory.side,
+                fraction: memory.pageFraction
+            )
+            let spoken = placed ? (tiles.layout?.spokenPlace(of: tools.id) ?? "pane") : "tab"
+            if placed {
+                rememberDevToolsPair(source: source.id, devtools: tools.id)
+            }
+            finishOpen(tools, spoken: spoken, afterReveal: afterReveal)
+            return
+        }
+        applyDefaultPlacement(source: source, tools: tools, afterReveal: afterReveal)
+    }
+
+    private func applyDefaultPlacement(source: BrowserTab, tools: DevToolsTab, afterReveal: (() -> Void)?) {
+        let width = Double(window?.frame.width ?? 1360)
+        let showing = tiles.isSplitVisible(activeID: activeID)
+        let sourceIsTiled = showing && (tiles.layout?.contains(source.id) == true)
+        let reading = sourceIsTiled ? (tiles.layout?.tabIDs() ?? []) : []
+        let plan = DevToolsPlacement.opening(
+            sourceIsTiled: sourceIsTiled,
+            paneCount: sourceIsTiled ? reading.count : 1,
+            windowWidth: width,
+            readingOrder: reading,
+            source: source.id
+        )
+        let side: DevToolsSide
+        let fraction: Double
+        switch plan {
+        case .pair(let axis, let pageFraction, let devtoolsFirst):
+            if axis == .vertical {
+                side = devtoolsFirst ? .above : .below
+            } else {
+                side = devtoolsFirst ? .left : .right
+            }
+            fraction = pageFraction
+        case .insertRight(let sourceKeeps):
+            side = .right
+            fraction = sourceKeeps
+        case .replace:
+            side = .right
+            fraction = DevToolsPlacement.pageFraction
+        }
+        let placed = placeDevToolsResolved(tools: tools, sourceID: source.id, side: side, fraction: fraction)
+        if placed {
+            rememberDevToolsPair(source: source.id, devtools: tools.id)
+        }
+        let spoken = placed ? (tiles.layout?.spokenPlace(of: tools.id) ?? "pane") : "tab"
+        finishOpen(tools, spoken: spoken, afterReveal: afterReveal)
+    }
+
+    private func finishOpen(_ tools: DevToolsTab, spoken: String, afterReveal: (() -> Void)?) {
+        announcedPaneID = tools.id
+        activateTab(id: tools.id, switching: true)
+        syncBars(progressOnly: false)
+        announce("Opened DevTools for \(tools.pageTitle), \(spoken)")
+        focusPaneContentIfNeeded()
+        inspectionOpenInFlight.remove(tools.sourceID)
+        afterReveal?()
+    }
+
+    /// At four panes, the last non-source pane returns to the strip before DevTools is placed.
+    @discardableResult
+    private func placeDevToolsResolved(tools: DevToolsTab, sourceID: UUID, side: DevToolsSide, fraction: Double) -> Bool {
+        guard session.contains(where: { $0.id == sourceID }) else { return false }
+        let layout = tiles.layout
+        let alreadyIn = layout?.contains(tools.id) == true
+        let sourceInSplit = layout?.isSplit == true && layout?.contains(sourceID) == true
+        let count = layout?.tabIDs().count ?? 0
+        if !alreadyIn, sourceInSplit, count >= TileArrangement.maximumPanes {
+            guard let reading = layout?.tabIDs(),
+                  let victim = DevToolsPlacement.paneToReplace(readingOrder: reading, source: sourceID) else {
+                return false
+            }
+            let previous = layout
+            let title = tabDisplayTitle(id: victim)
+            _ = tiles.remove(tabID: victim)
+            guard tiles.placeDevTools(devtools: tools.id, beside: sourceID, side: side, pageFraction: fraction) else {
+                if let previous {
+                    tiles.replaceLayout(previous)
+                }
+                return false
+            }
+            if let previous {
+                showFullSplitToast(title: title, previous: previous, devtoolsID: tools.id)
+            }
+            return true
+        }
+        return tiles.placeDevTools(devtools: tools.id, beside: sourceID, side: side, pageFraction: fraction)
+    }
+
+    private func configure(_ tools: DevToolsTab, source: BrowserTab) {
+        tools.onModeChange = { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.noteDevToolsFailureIfNeeded()
+                    self?.syncBars(progressOnly: false)
+                }
+            }
+        }
+        tools.host.onFrontendLoaded = { [weak self, weak source] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let source else { return }
+                    if self.inspectionOpenInFlight.contains(source.id) { return }
+                    self.noteInspectorAppeared(source: source)
+                }
+            }
+        }
+        _ = source
+    }
+
+    private func noteDevToolsFailureIfNeeded() {
+        guard !didAlertDevToolsFailure else { return }
+        let failed = session.contains { item in
+            if case .devtools(let tools) = item {
+                return tools.host.failedEntirely
+            }
+            return false
+        }
+        guard failed else { return }
+        didAlertDevToolsFailure = true
+        let alert = NSAlert()
+        alert.messageText = "Web Inspector could not open"
+        alert.informativeText = "Right-click the page and choose Inspect Element."
+        alert.addButton(withTitle: "OK")
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        }
+    }
+
+    private func noteInspectorAppeared(source: BrowserTab) {
+        if inspectionOpenInFlight.contains(source.id) { return }
+        if devToolsTabAnywhere(sourceID: source.id) != nil { return }
+        openDevTools(for: source, afterReveal: nil)
+    }
+
+    private func noteInspectionMenus() {
+        guard settings.settings.developerToolsEnabled else { return }
+        for item in session {
+            guard case .web(let tab) = item, tab.surface == .web else { continue }
+            guard WebInspectorHost.isBeingInspected(tab.webView) else { continue }
+            noteInspectorAppeared(source: tab)
+        }
+    }
+
+    private func ensureStandby(for tab: BrowserTab) {
+        guard tab.surface == .web, settings.settings.developerToolsEnabled else {
+            removeStandby(tab.id)
+            return
+        }
+        if devToolsTab(forSource: tab.id) != nil || suspendedDevTools[tab.id] != nil {
+            return
+        }
+        if standbyHosts[tab.id] != nil {
+            return
+        }
+        guard let content = window?.contentView else { return }
+        let view = DevToolsStandbyView(frame: NSRect(x: -2000, y: -2000, width: 800, height: 600))
+        content.addSubview(view)
+        let host = WebInspectorHost()
+        host.onFrontendLoaded = { [weak self, weak tab] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, let tab else { return }
+                    self.noteInspectorAppeared(source: tab)
+                }
+            }
+        }
+        host.prepareStandby(webView: tab.webView, container: view)
+        standbyHosts[tab.id] = host
+        standbyViews[tab.id] = view
+    }
+
+    private func removeStandby(_ id: UUID) {
+        standbyHosts.removeValue(forKey: id)?.shutdown()
+        standbyViews.removeValue(forKey: id)?.removeFromSuperview()
+    }
+
+    private func takeStandbyHost(sourceID: UUID) -> WebInspectorHost? {
+        standbyViews.removeValue(forKey: sourceID)?.removeFromSuperview()
+        return standbyHosts.removeValue(forKey: sourceID)
+    }
+
+    private func takeSuspended(sourceID: UUID) -> DevToolsTab? {
+        guard let parked = suspendedDevTools[sourceID] else { return nil }
+        let fresh = devToolsHiddenAt[sourceID].map { Date().timeIntervalSince($0) <= 30 } ?? false
+        suspendedDevTools[sourceID] = nil
+        devToolsHiddenAt[sourceID] = nil
+        guard fresh else {
+            parked.shutdown()
+            parked.container.removeFromSuperview()
+            return nil
+        }
+        parked.container.alphaValue = 1
+        return parked
+    }
+
+    private func armDevToolsExpiry(sourceID: UUID) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            MainActor.assumeIsolated {
+                self?.expireSuspendedDevTools(sourceID: sourceID)
+            }
+        }
+    }
+
+    private func expireSuspendedDevTools(sourceID: UUID) {
+        guard let hidden = devToolsHiddenAt[sourceID], Date().timeIntervalSince(hidden) >= 30 else { return }
+        guard let parked = suspendedDevTools.removeValue(forKey: sourceID) else { return }
+        parked.shutdown()
+        parked.container.removeFromSuperview()
+        devToolsHiddenAt[sourceID] = nil
+    }
+
+    /// Source closed in another window. Shuts this window's copy down without calling back.
+    func closePartnerDevTools(sourceID: UUID) {
+        if let parked = suspendedDevTools.removeValue(forKey: sourceID) {
+            parked.shutdown()
+            parked.container.removeFromSuperview()
+        }
+        devToolsHiddenAt[sourceID] = nil
+        devToolsMemory[sourceID] = nil
+        guard let tools = devToolsTab(forSource: sourceID),
+              let index = session.firstIndex(where: { $0.id == tools.id }) else {
+            return
+        }
+        tools.shutdown()
+        tools.container.removeFromSuperview()
+        let closingActive = tools.id == activeID
+        session.remove(at: index)
+        let preferred = tiles.remove(tabID: tools.id)
+        if session.isEmpty {
+            closeConfirmed = true
+            window?.close()
+            return
+        }
+        if closingActive {
+            let next = preferred.flatMap { id in session.contains(where: { $0.id == id }) ? id : nil }
+                ?? session[min(index, session.count - 1)].id
+            activateTab(id: next, switching: true)
+        }
+        syncBars(progressOnly: false)
+        noteSessionChange()
+    }
+
+    private func makeRestoredDevTools(source: BrowserTab) -> DevToolsTab {
+        let host = takeStandbyHost(sourceID: source.id) ?? WebInspectorHost()
+        let tools = DevToolsTab(source: source, host: host)
+        configure(tools, source: source)
+        return tools
+    }
+
+    private func syncDevToolsBars(_ tools: DevToolsTab) {
+        let source = webTab(id: tools.sourceID) ?? webTabInAnyWindow(id: tools.sourceID)
+        let loading = source?.surface == .web && source?.isLoading == true && (source?.estimatedProgress ?? 1) < 1
+        frameBar.showsProgress = loading
+        frameBar.fraction = loading ? (source?.estimatedProgress ?? 0) : 0
+        backButton.isEnabled = source?.canGoBack ?? false
+        forwardButton.isEnabled = source?.canGoForward ?? false
+        reloadButton.isEnabled = source?.surface == .web
+        reloadButton.toolTip = loading ? "Stop" : "Reload"
+        reloadButton.setAccessibilityLabel(loading ? "Stop" : "Reload")
+        let url = source?.displayedURL ?? tools.sourceURL
+        let allowed = Self.allowsBookmark(url)
+        let bookmarked = allowed && url.flatMap { bookmarks.bookmark(matchingURL: $0.absoluteString) } != nil
+        addressField.presentDevTools(url: url, bookmarked: bookmarked, canBookmark: allowed)
+        window?.title = "\(tools.displayTitle) — \(AppInfo.displayName)"
+        feedHealth(host: url?.host, url: url, rememberAs: source?.id)
+        refreshAppearanceProbe()
+        let inSplit = tiles.isSplitVisible(activeID: tools.id)
+        let sourceHere = webTab(id: tools.sourceID) != nil
+        setLinkedChip(visible: !inSplit || !sourceHere, title: tools.pageTitle, url: url?.absoluteString)
+        tabRegion.update(items: stripItems(selectedID: tools.id))
+        terminalHost.isHidden = true
+        bookmarksPage.isHidden = true
+        newTabPage.isHidden = true
+        webContainer.isHidden = inSplit
+        applyTileVisibility()
+    }
+
+    private func setLinkedChip(visible: Bool, title: String, url: String?) {
+        if visible {
+            linkedChip.present(title: title, url: url)
+            linkedChipLeading?.constant = MonoMetrics.itemGap
+            linkedChipWidth?.constant = measuredLinkedChipWidth(title: title)
+            linkedChip.isHidden = false
+        } else {
+            linkedChip.isHidden = true
+            linkedChipLeading?.constant = 0
+            linkedChipWidth?.constant = 0
+        }
+    }
+
+    private func measuredLinkedChipWidth(title: String) -> CGFloat {
+        let font = Theme.font(size: 11.5, weight: .regular)
+        let prefix = ("Linked to:" as NSString).size(withAttributes: [.font: font]).width
+        let titleWidth = min(220, (title as NSString).size(withAttributes: [.font: font]).width)
+        return 6 + 14 + 6 + prefix + 4 + titleWidth + 10
+    }
+
+    private func linkingDevToolsPartners(_ rows: [TabStripItem]) -> [TabStripItem] {
+        var toolsBySource: [UUID: UUID] = [:]
+        for item in session {
+            if case .devtools(let tab) = item, session.contains(where: { $0.id == tab.sourceID }) {
+                toolsBySource[tab.sourceID] = tab.id
+            }
+        }
+        guard !toolsBySource.isEmpty else { return rows }
+        return rows.map { row in
+            var copy = row
+            if let toolsID = toolsBySource[row.id] {
+                copy.partnerID = toolsID
+            }
+            return copy
+        }
+    }
+
+    /// DevTools stays immediately after its source. A tab whose source is gone is removed.
+    /// A tab whose source lives in another window stays put.
+    private func pinDevToolsOrder() -> Bool {
+        var removed = false
+        var partners: [UUID: UUID] = [:]
+        var drop: [DevToolsTab] = []
+        for item in session {
+            guard case .devtools(let tab) = item else { continue }
+            if session.contains(where: { $0.id == tab.sourceID }) {
+                partners[tab.id] = tab.sourceID
+            } else if windowHosting(tab: tab.sourceID) == nil {
+                drop.append(tab)
+            }
+        }
+        for tab in drop {
+            tab.shutdown()
+            tab.container.removeFromSuperview()
+            session.removeAll { $0.id == tab.id }
+            _ = tiles.remove(tabID: tab.id)
+            devToolsMemory[tab.sourceID] = nil
+            devToolsHiddenAt[tab.sourceID] = nil
+            removed = true
+        }
+        if let activeID, !session.contains(where: { $0.id == activeID }) {
+            self.activeID = session.first?.id
+        }
+        if session.isEmpty {
+            closeConfirmed = true
+            window?.close()
+            return true
+        }
+        guard !partners.isEmpty else { return removed }
+        let plan = DevToolsStrip.pinning(session.map(\.id), partners: partners)
+        return applySessionOrder(plan.order) || removed
+    }
+
+    private func parkInactiveDevTools() {
+        let showingSplit = tiles.isSplitVisible(activeID: activeID)
+        let showing = showingSplit ? Set(tiles.tabIDs()) : []
+        for item in session {
+            guard case .devtools(let tools) = item else { continue }
+            if item.id == activeID || showing.contains(item.id) { continue }
+            if tools.container.superview === webContainer {
+                tools.container.removeFromSuperview()
+            }
+        }
+    }
+
+    private func attachVisibleDevTools() {
+        for item in session {
+            guard case .devtools(let tools) = item else { continue }
+            guard tools.container.window != nil else { continue }
+            tools.attachAndShowIfNeeded()
+        }
+    }
+
+    /// Placement memory lives on the window that holds the source page.
+    private func storeDevToolsMemory(_ memory: DevToolsPlaceMemory, sourceID: UUID) {
+        let home = windowHosting(tab: sourceID) ?? self
+        if home !== self {
+            devToolsMemory[sourceID] = nil
+        }
+        home.devToolsMemory[sourceID] = memory
+    }
+
+    private func rememberDevToolsPair(source: UUID, devtools: UUID) {
+        let side = tiles.layout.flatMap { DevToolsPlacement.side(of: devtools, relativeTo: source, in: $0) } ?? .right
+        let fraction = tiles.layout.flatMap { DevToolsPlacement.pageFraction(source: source, devtools: devtools, in: $0) }
+            ?? DevToolsPlacement.pageFraction
+        storeDevToolsMemory(
+            DevToolsPlaceMemory(side: side, pageFraction: fraction, poppedOut: false, windowed: false),
+            sourceID: source
+        )
+    }
+
+    private func rememberDevToolsWindowFrameIfNeeded() {
+        guard let frame = window?.frame, !session.isEmpty else { return }
+        let onlyWindowedTools = session.allSatisfy { item in
+            guard case .devtools(let tools) = item else { return false }
+            return !session.contains(where: { $0.id == tools.sourceID })
+        }
+        guard onlyWindowedTools else { return }
+        AppDelegate.rememberDevToolsWindowFrame(frame)
+    }
+
+    private func showSourceOfActiveDevTools() {
+        guard let tools = activeDevToolsTab() else { return }
+        focusSource(of: tools)
+    }
+
+    private func focusSource(of tools: DevToolsTab) {
+        if webTab(id: tools.sourceID) != nil {
+            _ = focusTab(id: tools.sourceID)
+            return
+        }
+        if let home = windowHosting(tab: tools.sourceID) {
+            _ = home.focusTab(id: tools.sourceID)
+        }
+    }
+
+    private func tabDisplayTitle(id: UUID) -> String {
+        guard let item = session.first(where: { $0.id == id }) else { return "Tab" }
+        switch item {
+        case .web(let tab):
+            return tab.title
+        case .terminal(let tab):
+            return tab.name
+        case .devtools(let tab):
+            return tab.pageTitle
+        }
+    }
+
+    private func showFullSplitToast(title: String, previous: TileLayout, devtoolsID: UUID) {
+        toastUndoLayout = previous
+        toastUndoDevToolsID = devtoolsID
+        splitToast.present(title: title)
+        splitToast.isHidden = false
+        toastTimer?.invalidate()
+        let timer = Timer(timeInterval: 3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.dismissSplitToast()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        toastTimer = timer
+    }
+
+    private func dismissSplitToast() {
+        toastTimer?.invalidate()
+        toastTimer = nil
+        splitToast.isHidden = true
+        toastUndoLayout = nil
+        toastUndoDevToolsID = nil
+    }
+
+    private func undoFullSplitToast() {
+        guard let previous = toastUndoLayout else { return }
+        let toolsID = toastUndoDevToolsID
+        toastTimer?.invalidate()
+        toastTimer = nil
+        splitToast.isHidden = true
+        toastUndoLayout = nil
+        toastUndoDevToolsID = nil
+        tiles.replaceLayout(previous)
+        if let toolsID, let tools = devToolsTab(id: toolsID) {
+            var memory = devToolsMemory[tools.sourceID] ?? DevToolsPlaceMemory(
+                side: .right,
+                pageFraction: DevToolsPlacement.pageFraction,
+                poppedOut: true,
+                windowed: false
+            )
+            memory.poppedOut = true
+            memory.windowed = false
+            devToolsMemory[tools.sourceID] = memory
+        }
+        if let id = activeID, !previous.contains(id) {
+            let focus = previous.focusedTabID
+            if session.contains(where: { $0.id == focus }) {
+                activateTab(id: focus, switching: false)
+            }
+        }
+        syncBars(progressOnly: false)
+    }
+
+    private func announce(_ message: String) {
+        NSAccessibility.post(element: tiles.canvas, notification: .announcementRequested, userInfo: [
+            .announcement: message as NSString
+        ])
+    }
+
+    private func devToolsDropCaption(dragging: UUID, anchor: UUID, edge: TileEdge) -> String {
+        guard sessionKind(id: dragging) == .devtools, let tools = devToolsTab(id: dragging) else { return "" }
+        guard anchor == tools.sourceID || anchor == dragging else { return "" }
+        return DevToolsSide(edge: edge).dropLabel
+    }
+
+    private func movePartnerDevTools(of tab: SessionTab, to target: BrowserWindowController) {
+        guard case .web = tab else { return }
+        let sourceID = tab.id
+        if let memory = devToolsMemory.removeValue(forKey: sourceID) {
+            target.devToolsMemory[sourceID] = memory
+        }
+        if let hidden = devToolsHiddenAt.removeValue(forKey: sourceID) {
+            target.devToolsHiddenAt[sourceID] = hidden
+        }
+        if let parked = suspendedDevTools.removeValue(forKey: sourceID) {
+            target.suspendedDevTools[sourceID] = parked
+            parked.container.removeFromSuperview()
+            if let content = target.window?.contentView {
+                parked.container.frame = NSRect(x: -2000, y: -2000, width: 800, height: 600)
+                content.addSubview(parked.container)
+            }
+        }
+        guard let tools = devToolsTab(forSource: sourceID) else { return }
+        let wasInSplit = tiles.layout?.contains(tools.id) == true
+        let memory = target.devToolsMemory[sourceID]
+        guard let index = indexOfTab(id: tools.id), let item = detachTab(at: index) else { return }
+        let insertAt = (target.indexOfTab(id: sourceID) ?? (target.session.count - 1)) + 1
+        target.adopt(tab: item, at: insertAt)
+        let popped = memory?.poppedOut == true || memory?.windowed == true
+        let targetLayout = target.tiles.layout
+        let unrelatedSplit = targetLayout?.isSplit == true && targetLayout?.contains(sourceID) != true
+        if wasInSplit, !popped, !unrelatedSplit {
+            let side = memory?.side ?? .right
+            let fraction = memory?.pageFraction ?? DevToolsPlacement.pageFraction
+            _ = target.placeDevToolsResolved(tools: tools, sourceID: sourceID, side: side, fraction: fraction)
+        }
+        target.activateTab(id: sourceID, switching: false)
+        target.syncBars(progressOnly: false)
+    }
+
+    private func noteDevToolsDraggedToAnotherWindow(_ tab: SessionTab) {
+        guard case .devtools(let tools) = tab else { return }
+        let sourceID = tools.sourceID
+        let home = windowHosting(tab: sourceID) ?? self
+        let together = home.session.contains(where: { $0.id == tools.id })
+        var memory = home.devToolsMemory[sourceID] ?? DevToolsPlaceMemory(
+            side: .right,
+            pageFraction: DevToolsPlacement.pageFraction,
+            poppedOut: false,
+            windowed: false
+        )
+        if together {
+            memory.poppedOut = true
+            memory.windowed = false
+        } else {
+            memory.windowed = true
+            memory.poppedOut = false
+        }
+        home.devToolsMemory[sourceID] = memory
+    }
+
+    private func moveDevTools(id: UUID, to side: DevToolsSide) {
+        guard let tools = devToolsTab(id: id) else { return }
+        let sourceID = tools.sourceID
+        if !session.contains(where: { $0.id == sourceID }) {
+            guard let home = windowHosting(tab: sourceID), home !== self,
+                  let index = indexOfTab(id: tools.id),
+                  let tab = detachTab(at: index) else { return }
+            let insertAt = (home.indexOfTab(id: sourceID) ?? (home.session.count - 1)) + 1
+            home.adopt(tab: tab, at: insertAt)
+            home.moveDevTools(id: tools.id, to: side)
+            closeIfEmpty()
+            return
+        }
+        guard placeDevToolsResolved(
+            tools: tools,
+            sourceID: sourceID,
+            side: side,
+            fraction: DevToolsPlacement.pageFraction
+        ) else { return }
+        var memory = devToolsMemory[sourceID] ?? DevToolsPlaceMemory(
+            side: side,
+            pageFraction: DevToolsPlacement.pageFraction,
+            poppedOut: false,
+            windowed: false
+        )
+        memory.side = side
+        memory.pageFraction = DevToolsPlacement.pageFraction
+        memory.poppedOut = false
+        memory.windowed = false
+        devToolsMemory[sourceID] = memory
+        announcedPaneID = tools.id
+        activateTab(id: tools.id, switching: false)
+        syncBars(progressOnly: false)
+        announce(side.moveAnnouncement)
+        focusPaneContentIfNeeded()
+    }
+
+    private func popOutDevTools(id: UUID) {
+        guard let tools = devToolsTab(id: id) else { return }
+        _ = tiles.remove(tabID: id)
+        var memory = devToolsMemory[tools.sourceID] ?? DevToolsPlaceMemory(
+            side: .right,
+            pageFraction: DevToolsPlacement.pageFraction,
+            poppedOut: true,
+            windowed: false
+        )
+        memory.poppedOut = true
+        memory.windowed = false
+        storeDevToolsMemory(memory, sourceID: tools.sourceID)
+        announcedPaneID = id
+        activateTab(id: id, switching: true)
+        syncBars(progressOnly: false)
+        focusPaneContentIfNeeded()
+    }
+
+    @discardableResult
+    private func relocateDevToolsToNewWindow(id: UUID) -> Bool {
+        guard let app = NSApp.delegate as? AppDelegate else { return false }
+        guard let tools = devToolsTab(id: id), let index = indexOfTab(id: id) else { return false }
+        let sourceID = tools.sourceID
+        var memory = devToolsMemory[sourceID] ?? DevToolsPlaceMemory(
+            side: .right,
+            pageFraction: DevToolsPlacement.pageFraction,
+            poppedOut: false,
+            windowed: true
+        )
+        memory.windowed = true
+        memory.poppedOut = false
+        guard let tab = detachTab(at: index) else { return false }
+        if session.contains(where: { $0.id == sourceID }) {
+            devToolsMemory[sourceID] = memory
+        } else if let home = windowHosting(tab: sourceID) {
+            home.devToolsMemory[sourceID] = memory
+        } else {
+            devToolsMemory[sourceID] = memory
+        }
+        app.presentDevToolsWindow(tab)
+        closeIfEmpty()
+        return true
+    }
+
+    private func devToolsContextMenu(for id: UUID) -> NSMenu {
+        let menu = NSMenu()
+        let withPage: Bool = {
+            guard let tools = devToolsTab(id: id), let layout = tiles.layout, layout.isSplit else { return false }
+            return layout.contains(id) && layout.contains(tools.sourceID)
+        }()
+        if !withPage {
+            menu.addItem(menuItem("Split with Page", action: #selector(splitDevToolsWithPage(_:)), id: id))
+        }
+        let move = NSMenuItem(title: "Move", action: nil, keyEquivalent: "")
+        move.submenu = devToolsMoveMenu(for: id)
+        menu.addItem(move)
+        menu.addItem(menuItem("Pop Out to Tab", action: #selector(popOutDevToolsItem(_:)), id: id))
+        menu.addItem(menuItem("Move to New Window", action: #selector(moveDevToolsToNewWindow(_:)), id: id))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Reload Source", action: #selector(reloadDevToolsSource(_:)), id: id))
+        menu.addItem(menuItem("Show Source Tab", action: #selector(showDevToolsSource(_:)), id: id))
+        menu.addItem(.separator())
+        let close = menuItem("Close DevTools", action: #selector(closeDevToolsFromMenu(_:)), id: id)
+        close.keyEquivalent = "i"
+        close.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(close)
+        return menu
+    }
+
+    private func devToolsMoveMenu(for id: UUID) -> NSMenu {
+        let menu = NSMenu()
+        let current = currentDevToolsSide(id: id)
+        for side in [DevToolsSide.left, .right, .above, .below] {
+            let item = NSMenuItem(title: side.menuTitle, action: #selector(moveDevToolsToSide(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            item.tag = tag(for: side)
+            item.state = side == current ? .on : .off
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func showDevToolsOverflow(id: UUID, anchor: NSView) {
+        let menu = NSMenu()
+        menu.addItem(menuItem("Move to New Window", action: #selector(moveDevToolsToNewWindow(_:)), id: id))
+        menu.addItem(menuItem("Reload Source", action: #selector(reloadDevToolsSource(_:)), id: id))
+        menu.addItem(menuItem("Show Source Tab", action: #selector(showDevToolsSource(_:)), id: id))
+        menu.addItem(menuItem("Close DevTools", action: #selector(closeDevToolsFromMenu(_:)), id: id))
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height), in: anchor)
+    }
+
+    private func currentDevToolsSide(id: UUID) -> DevToolsSide? {
+        guard let tools = devToolsTab(id: id), let layout = tiles.layout else { return nil }
+        return DevToolsPlacement.side(of: tools.id, relativeTo: tools.sourceID, in: layout)
+    }
+
+    private func tag(for side: DevToolsSide) -> Int {
+        switch side {
+        case .left: return 1
+        case .right: return 2
+        case .above: return 3
+        case .below: return 4
+        }
+    }
+
+    private func devToolsSide(tag: Int) -> DevToolsSide? {
+        switch tag {
+        case 1: return .left
+        case 2: return .right
+        case 3: return .above
+        case 4: return .below
+        default: return nil
+        }
+    }
+
+    private func menuDevToolsID(_ sender: Any?) -> UUID? {
+        (sender as? NSMenuItem)?.representedObject as? UUID
+    }
+
+    @objc func moveDevToolsLeft(_ sender: Any?) {
+        _ = sender
+        guard let id = activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: .left)
+    }
+
+    @objc func moveDevToolsRight(_ sender: Any?) {
+        _ = sender
+        guard let id = activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: .right)
+    }
+
+    @objc func moveDevToolsAbove(_ sender: Any?) {
+        _ = sender
+        guard let id = activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: .above)
+    }
+
+    @objc func moveDevToolsBelow(_ sender: Any?) {
+        _ = sender
+        guard let id = activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: .below)
+    }
+
+    @objc func moveDevToolsToSide(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let side = devToolsSide(tag: item.tag) else { return }
+        guard let id = (item.representedObject as? UUID) ?? activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: side)
+    }
+
+    @objc func popOutDevToolsItem(_ sender: Any?) {
+        guard let id = menuDevToolsID(sender) ?? activeDevToolsTab()?.id else { return }
+        popOutDevTools(id: id)
+    }
+
+    @objc func moveDevToolsToNewWindow(_ sender: Any?) {
+        guard let id = menuDevToolsID(sender) ?? activeDevToolsTab()?.id else { return }
+        relocateDevToolsToNewWindow(id: id)
+    }
+
+    @objc func reloadDevToolsSource(_ sender: Any?) {
+        let id = menuDevToolsID(sender)
+        let tools = id.flatMap { devToolsTab(id: $0) } ?? activeDevToolsTab()
+        tools?.reloadSource()
+    }
+
+    @objc func showDevToolsSource(_ sender: Any?) {
+        if let id = menuDevToolsID(sender), let tools = devToolsTab(id: id) {
+            focusSource(of: tools)
+            return
+        }
+        showSourceOfActiveDevTools()
+    }
+
+    @objc func closeDevToolsFromMenu(_ sender: Any?) {
+        guard let id = menuDevToolsID(sender) ?? activeDevToolsTab()?.id else { return }
+        closeTab(id: id)
+    }
+
+    @objc func splitDevToolsWithPage(_ sender: Any?) {
+        guard let id = menuDevToolsID(sender) ?? activeDevToolsTab()?.id else { return }
+        moveDevTools(id: id, to: .right)
     }
 
     private func emitPopoverID() {
@@ -2155,9 +4898,84 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
 
 extension BrowserWindowController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(closeTab(_:)) {
+        switch menuItem.action {
+        case #selector(closeTab(_:)):
             return !session.isEmpty
+        case #selector(splitRight(_:)):
+            let anchor = (menuItem.representedObject as? UUID) ?? activeID
+            guard let anchor else { return false }
+            return canAddPane(beside: anchor, edge: .right)
+        case #selector(splitDown(_:)):
+            let anchor = (menuItem.representedObject as? UUID) ?? activeID
+            guard let anchor else { return false }
+            return canAddPane(beside: anchor, edge: .down)
+        case #selector(splitWithCurrentTab(_:)):
+            guard let clicked = menuItem.representedObject as? UUID,
+                  session.contains(where: { $0.id == clicked }) else { return false }
+            if clicked == activeID {
+                return canAddPane(beside: clicked, edge: .right)
+            }
+            if let layout = tiles.layout, layout.isSplit {
+                if layout.tabIDs().count >= TileArrangement.maximumPanes, !layout.contains(clicked) {
+                    return false
+                }
+                if !layout.contains(clicked), let current = activeID, !layout.contains(current) {
+                    return false
+                }
+            }
+            return true
+        case #selector(addToSplit(_:)):
+            guard let id = menuItem.representedObject as? UUID,
+                  let layout = tiles.layout, layout.isSplit, !layout.contains(id) else { return false }
+            if layout.tabIDs().count >= TileArrangement.maximumPanes {
+                menuItem.toolTip = "Split View holds up to 4 tabs"
+                return false
+            }
+            return true
+        case #selector(removeFromSplit(_:)):
+            guard let id = menuItem.representedObject as? UUID else { return false }
+            return tiles.layout?.contains(id) == true
+        case #selector(closePane(_:)),
+             #selector(focusNextPane(_:)),
+             #selector(focusPreviousPane(_:)),
+             #selector(focusPaneLeft(_:)),
+             #selector(focusPaneRight(_:)),
+             #selector(focusPaneUp(_:)),
+             #selector(focusPaneDown(_:)),
+             #selector(swapPaneLeft(_:)),
+             #selector(swapPaneRight(_:)),
+             #selector(equalizePanes(_:)):
+            return tiles.isSplitVisible(activeID: activeID)
+        case #selector(unsplit(_:)):
+            return tiles.hasSavedSplit
+        case #selector(applyLayout(_:)):
+            return activeID != nil
+        case #selector(moveDevToolsLeft(_:)),
+             #selector(moveDevToolsRight(_:)),
+             #selector(moveDevToolsAbove(_:)),
+             #selector(moveDevToolsBelow(_:)):
+            return activeDevToolsTab() != nil
+        case #selector(popOutDevToolsItem(_:)),
+             #selector(moveDevToolsToNewWindow(_:)),
+             #selector(reloadDevToolsSource(_:)),
+             #selector(showDevToolsSource(_:)),
+             #selector(closeDevToolsFromMenu(_:)),
+             #selector(splitDevToolsWithPage(_:)),
+             #selector(moveDevToolsToSide(_:)):
+            let id = (menuItem.representedObject as? UUID) ?? activeDevToolsTab()?.id
+            guard let id else { return false }
+            return devToolsTab(id: id) != nil
+        default:
+            return true
         }
-        return true
+    }
+
+    private func canAddPane(beside anchor: UUID, edge: TileEdge) -> Bool {
+        guard session.contains(where: { $0.id == anchor }) else { return false }
+        guard let layout = tiles.layout, layout.isSplit else { return true }
+        if !layout.contains(anchor) {
+            return layout.tabIDs().count < TileArrangement.maximumPanes
+        }
+        return layout.expanded(adding: UUID(), beside: anchor, edge: edge) != nil
     }
 }

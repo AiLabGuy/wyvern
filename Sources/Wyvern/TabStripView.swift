@@ -17,8 +17,22 @@ struct TabStripItem: Equatable {
     var badgeHex: String
     var favicon: NSImage?
     var selected: Bool
+    /// True for every tab in the saved split, including while a non-member is selected.
+    var groupMember: Bool = false
+    /// Mini split glyph drawn before the favicon while this tab is in the saved split.
+    var splitGlyph: IconGlyph? = nil
+    /// How many tabs are in the saved split. Members use a 140 pt width at 3 or 4.
+    var memberCount: Int = 0
     var kind: TabKind = .web
     var glyph: IconGlyph?
+    /// Mute prefix that never truncates, for example "DevTools:".
+    var titlePrefix: String? = nil
+    /// Page title shown after the prefix. The full `title` stays in the tooltip.
+    var pageTitle: String? = nil
+    /// The other tab in a DevTools pair.
+    var partnerID: UUID? = nil
+    /// `{}` tile in place of the favicon.
+    var devtoolsTile: Bool = false
     var accessibilityLabel: String?
     var accessibilityValue: String?
     var accessibilityHelp: String?
@@ -29,8 +43,15 @@ struct TabStripItem: Equatable {
             && lhs.badgeLetter == rhs.badgeLetter
             && lhs.badgeHex == rhs.badgeHex
             && lhs.selected == rhs.selected
+            && lhs.groupMember == rhs.groupMember
+            && lhs.splitGlyph == rhs.splitGlyph
+            && lhs.memberCount == rhs.memberCount
             && lhs.kind == rhs.kind
             && lhs.glyph == rhs.glyph
+            && lhs.titlePrefix == rhs.titlePrefix
+            && lhs.pageTitle == rhs.pageTitle
+            && lhs.partnerID == rhs.partnerID
+            && lhs.devtoolsTile == rhs.devtoolsTile
             && lhs.accessibilityLabel == rhs.accessibilityLabel
             && lhs.accessibilityValue == rhs.accessibilityValue
             && lhs.accessibilityHelp == rhs.accessibilityHelp
@@ -44,12 +65,23 @@ final class TabRegionView: NSView {
     var onSelect: ((UUID) -> Void)?
     var onClose: ((UUID) -> Void)?
     var onNewTab: (() -> Void)?
+    var contextMenuForTab: ((UUID) -> NSMenu?)?
+    /// Screen point of a tab drag that has passed the start distance. The window uses it for the drop preview.
+    var onTabDrag: ((UUID, NSPoint) -> Void)?
     /// Right click on the new-tab button. Left click stays a new web tab.
     var onTerminalPicker: ((NSView) -> Void)?
 
     private let stack = NSStackView()
+    private let capsule = SplitGroupCapsule()
+    private let links = DevToolsLinkOverlay()
     private let plus = ToolButton()
     private var itemViews: [UUID: TabItemView] = [:]
+    private var displayed: [TabStripItem] = []
+    /// Pins the capsule to the first and last member. A frame copied during reorder
+    /// stayed on the old slots after the stack moved the tabs.
+    private var capsulePins: [NSLayoutConstraint] = []
+    private weak var pinnedCapsuleFirst: TabItemView?
+    private weak var pinnedCapsuleLast: TabItemView?
 
     /// Left click opens a web tab. The menu lists terminal bookmarks.
     var newTabButton: NSView { plus }
@@ -87,7 +119,11 @@ final class TabRegionView: NSView {
         setAccessibilityLabel("Tabs")
         stack.setAccessibilityElement(false)
 
+        capsule.translatesAutoresizingMaskIntoConstraints = true
+        links.translatesAutoresizingMaskIntoConstraints = true
+        addSubview(capsule)
         addSubview(stack)
+        addSubview(links)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -101,6 +137,15 @@ final class TabRegionView: NSView {
     }
 
     func update(items: [TabStripItem]) {
+        if items.count == displayed.count,
+           zip(items, displayed).allSatisfy({ next, previous in
+               next == previous && next.favicon === previous.favicon
+           }) {
+            return
+        }
+        displayed = items
+        // Drop pins before tabs leave the stack. A constraint onto a removed view is invalid.
+        clearCapsulePins()
         let remaining = Set(items.map(\.id))
         for (id, view) in itemViews where !remaining.contains(id) {
             stack.removeArrangedSubview(view)
@@ -120,26 +165,157 @@ final class TabRegionView: NSView {
                 view = TabItemView(item: item, index: index)
                 view.translatesAutoresizingMaskIntoConstraints = false
                 itemViews[item.id] = view
+                let width = view.widthAnchor.constraint(equalToConstant: MonoMetrics.tabWidth)
+                view.attachWidth(width)
                 NSLayoutConstraint.activate([
-                    view.widthAnchor.constraint(equalToConstant: MonoMetrics.tabWidth),
+                    width,
                     view.heightAnchor.constraint(equalToConstant: MonoMetrics.tabHeight)
                 ])
+                view.apply(item, index: index)
             }
             view.onSelect = { [weak self] in self?.onSelect?(item.id) }
             view.onClose = { [weak self] in self?.onClose?(item.id) }
-            let arranged = stack.arrangedSubviews
-            if index < arranged.count {
-                if arranged[index] !== view {
-                    if view.superview === stack {
-                        stack.removeArrangedSubview(view)
-                    }
-                    stack.insertArrangedSubview(view, at: index)
-                }
-            } else {
-                stack.addArrangedSubview(view)
+            view.onDragChanged = { [weak self] point in self?.onTabDrag?(item.id, point) }
+            view.onHover = { [weak self] inside in
+                self?.hoverPartner(of: item.id, inside: inside)
             }
+            view.contextMenuProvider = { [weak self] in self?.contextMenuForTab?(item.id) }
+            let arranged = stack.arrangedSubviews
+            if index < arranged.count, arranged[index] === view {
+                continue
+            }
+            // Drop the old subview slot too. removeArrangedSubview alone leaves the view
+            // in `subviews`, and the stack then lays the tab out at its previous index.
+            if view.superview === stack {
+                stack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+            let slot = min(index, stack.arrangedSubviews.count)
+            stack.insertArrangedSubview(view, at: slot)
         }
         stack.addArrangedSubview(plus)
+        linkPartners()
+        syncCapsulePins()
+        needsLayout = true
+    }
+
+    /// The capsule tracks the member views. Measuring frames inside `layout` kept the
+    /// pill on the pre-reorder slots (the active tab and the one before it) while the
+    /// glyphs moved with the members.
+    private func syncCapsulePins() {
+        let ids = displayed.map(\.id)
+        var members = Set<UUID>()
+        for item in displayed where item.groupMember {
+            members.insert(item.id)
+        }
+        let tabs = ids.compactMap { itemViews[$0] }
+        let span = tabs.count == ids.count ? TileStripGroup.memberSpan(session: ids, members: members) : nil
+        guard let span else {
+            clearCapsulePins()
+            return
+        }
+        let first = tabs[span.lowerBound]
+        let last = tabs[span.upperBound]
+        if pinnedCapsuleFirst !== first || pinnedCapsuleLast !== last || capsulePins.isEmpty {
+            clearCapsulePins()
+            capsule.translatesAutoresizingMaskIntoConstraints = false
+            let pins = [
+                capsule.leadingAnchor.constraint(equalTo: first.leadingAnchor),
+                capsule.trailingAnchor.constraint(equalTo: last.trailingAnchor),
+                capsule.topAnchor.constraint(equalTo: first.topAnchor),
+                capsule.bottomAnchor.constraint(equalTo: last.bottomAnchor)
+            ]
+            // Below required so a pin cannot override a tab's width constraint.
+            let belowRequired = NSLayoutConstraint.Priority(rawValue: 999)
+            for pin in pins {
+                pin.priority = belowRequired
+            }
+            NSLayoutConstraint.activate(pins)
+            capsulePins = pins
+            pinnedCapsuleFirst = first
+            pinnedCapsuleLast = last
+        }
+        if capsule.isHidden {
+            capsule.isHidden = false
+        }
+        let elevated = displayed.contains { $0.groupMember && $0.selected }
+        if capsule.elevated != elevated {
+            capsule.elevated = elevated
+        }
+    }
+
+    private func clearCapsulePins() {
+        if !capsulePins.isEmpty {
+            NSLayoutConstraint.deactivate(capsulePins)
+            capsulePins.removeAll()
+        }
+        pinnedCapsuleFirst = nil
+        pinnedCapsuleLast = nil
+        // No pins: an unconstrained capsule (translates off, hidden) is an ambiguous layout.
+        capsule.translatesAutoresizingMaskIntoConstraints = true
+        if !capsule.isHidden {
+            capsule.isHidden = true
+        }
+    }
+
+    private func hoverPartner(of id: UUID, inside: Bool) {
+        guard let item = displayed.first(where: { $0.id == id }), let partner = item.partnerID else { return }
+        itemViews[partner]?.setPartnerHighlight(inside)
+    }
+
+    private func linkPartners() {
+        for item in displayed {
+            guard let view = itemViews[item.id] else { continue }
+            if let partner = item.partnerID, let other = itemViews[partner] {
+                view.setAccessibilityLinkedUIElements([other])
+            } else {
+                view.setAccessibilityLinkedUIElements(nil)
+            }
+        }
+    }
+
+    /// Orders the drag image out. The window decides whether the drop is kept.
+    func cancelTabDrags() {
+        for view in itemViews.values {
+            view.cancelDragSession()
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        placeLinks()
+    }
+
+    /// 6×2 accent bar across the 2 px gap, plus a 4 px dot on each tab edge.
+    /// Design y = 19 from the top of the 30 px tab. The view is not flipped.
+    private func placeLinks() {
+        if links.frame != bounds {
+            links.frame = bounds
+        }
+        var drawn: [DevToolsLinkOverlay.Link] = []
+        let tabs = stack.arrangedSubviews.compactMap { $0 as? TabItemView }
+        if displayed.count == tabs.count {
+            for (index, item) in displayed.enumerated() {
+                guard let partner = item.partnerID, index + 1 < displayed.count,
+                      displayed[index + 1].id == partner else { continue }
+                let left = tabs[index].convert(tabs[index].bounds, to: self)
+                let right = tabs[index + 1].convert(tabs[index + 1].bounds, to: self)
+                let midY = left.minY + (left.height - 19)
+                drawn.append(DevToolsLinkOverlay.Link(
+                    gapMidX: (left.maxX + right.minX) / 2,
+                    midY: midY,
+                    leftEdgeX: left.maxX,
+                    rightEdgeX: right.minX
+                ))
+            }
+        }
+        if links.links != drawn {
+            links.links = drawn
+        }
+        let hideLinks = drawn.isEmpty
+        if links.isHidden != hideLinks {
+            links.isHidden = hideLinks
+        }
     }
 
     func itemView(id: UUID) -> TabItemView? {
@@ -220,18 +396,32 @@ final class TabCloseButton: NSButton {
 final class TabItemView: NSView {
     var onSelect: (() -> Void)?
     var onClose: (() -> Void)?
+    var onDragChanged: ((NSPoint) -> Void)?
+    var onHover: ((Bool) -> Void)?
+    var contextMenuProvider: (() -> NSMenu?)?
 
     private var selected = false
+    private var groupMember = false
     private var hovering = false
     private var kind: TabKind = .web
+    private var devtoolsTile = false
     private var tracking: NSTrackingArea?
     private let badge = LetterBadgeView()
+    private let splitMark = GlyphView()
     private let mark = GlyphView()
     private let imageView = NSImageView()
     private let titleField = NSTextField(labelWithString: "")
+    private let prefixField = NSTextField(labelWithString: "")
+    private let braces = DevToolsBracesView()
+    private let partnerRing = DevToolsPartnerRing()
     private let closeButton = TabCloseButton()
+    private var prefixWidth: NSLayoutConstraint?
+    private var prefixGap: NSLayoutConstraint?
     private var closeWidth: NSLayoutConstraint?
     private var closeGap: NSLayoutConstraint?
+    private var splitMarkWidth: NSLayoutConstraint?
+    private var splitMarkGap: NSLayoutConstraint?
+    private var widthConstraint: NSLayoutConstraint?
     private let tabID: UUID
     private var dragOriginInWindow: NSPoint?
     /// Cocoa screen point of mouse-down. Synthetic drags can leave `locationInWindow` stuck.
@@ -255,6 +445,10 @@ final class TabItemView: NSView {
 
         mark.translatesAutoresizingMaskIntoConstraints = false
         mark.isHidden = true
+        splitMark.translatesAutoresizingMaskIntoConstraints = false
+        splitMark.isHidden = true
+        splitMark.pointSize = 12
+        splitMark.tint = Theme.mute
 
         titleField.font = Theme.font(size: 12)
         titleField.lineBreakMode = .byTruncatingTail
@@ -262,6 +456,18 @@ final class TabItemView: NSView {
         titleField.translatesAutoresizingMaskIntoConstraints = false
         titleField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         titleField.setAccessibilityElement(false)
+        prefixField.font = Theme.font(size: 12, weight: .medium)
+        prefixField.textColor = Theme.mute
+        prefixField.lineBreakMode = .byClipping
+        prefixField.maximumNumberOfLines = 1
+        prefixField.translatesAutoresizingMaskIntoConstraints = false
+        prefixField.setContentCompressionResistancePriority(.required, for: .horizontal)
+        prefixField.setContentHuggingPriority(.required, for: .horizontal)
+        prefixField.setAccessibilityElement(false)
+        braces.translatesAutoresizingMaskIntoConstraints = false
+        braces.isHidden = true
+        partnerRing.translatesAutoresizingMaskIntoConstraints = false
+        partnerRing.alphaValue = 0
         badge.setAccessibilityElement(false)
         imageView.setAccessibilityElement(false)
 
@@ -281,21 +487,45 @@ final class TabItemView: NSView {
         closeButton.action = #selector(closeTapped)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
 
+        addSubview(partnerRing)
+        addSubview(splitMark)
         addSubview(badge)
+        addSubview(braces)
         addSubview(mark)
         addSubview(imageView)
+        addSubview(prefixField)
         addSubview(titleField)
         addSubview(closeButton)
 
         let width = closeButton.widthAnchor.constraint(equalToConstant: 0)
         let gap = titleField.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: 0)
+        let glyphWidth = splitMark.widthAnchor.constraint(equalToConstant: 0)
+        let glyphGap = badge.leadingAnchor.constraint(equalTo: splitMark.trailingAnchor, constant: 0)
+        let prefixW = prefixField.widthAnchor.constraint(equalToConstant: 0)
+        let prefixG = titleField.leadingAnchor.constraint(equalTo: prefixField.trailingAnchor, constant: 0)
         closeWidth = width
         closeGap = gap
+        splitMarkWidth = glyphWidth
+        splitMarkGap = glyphGap
+        prefixWidth = prefixW
+        prefixGap = prefixG
         NSLayoutConstraint.activate([
-            badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MonoMetrics.tabPadding),
+            partnerRing.leadingAnchor.constraint(equalTo: leadingAnchor),
+            partnerRing.trailingAnchor.constraint(equalTo: trailingAnchor),
+            partnerRing.topAnchor.constraint(equalTo: topAnchor),
+            partnerRing.bottomAnchor.constraint(equalTo: bottomAnchor),
+            splitMark.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MonoMetrics.tabPadding),
+            splitMark.centerYAnchor.constraint(equalTo: centerYAnchor),
+            glyphWidth,
+            splitMark.heightAnchor.constraint(equalToConstant: 12),
+            glyphGap,
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.widthAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
             badge.heightAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
+            braces.leadingAnchor.constraint(equalTo: badge.leadingAnchor),
+            braces.centerYAnchor.constraint(equalTo: centerYAnchor),
+            braces.widthAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
+            braces.heightAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
             mark.leadingAnchor.constraint(equalTo: badge.leadingAnchor),
             mark.centerYAnchor.constraint(equalTo: centerYAnchor),
             mark.widthAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
@@ -304,8 +534,11 @@ final class TabItemView: NSView {
             imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
             imageView.widthAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
             imageView.heightAnchor.constraint(equalToConstant: MonoMetrics.tabIcon),
-            titleField.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: MonoMetrics.tabInnerGap),
+            prefixField.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: MonoMetrics.tabInnerGap),
+            prefixField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            prefixW,
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            prefixG,
             gap,
             closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -MonoMetrics.tabPadding),
             closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -320,9 +553,38 @@ final class TabItemView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    func attachWidth(_ constraint: NSLayoutConstraint) {
+        widthConstraint = constraint
+    }
+
+    /// Hides the floating drag image. Mouse-up still reaches the window, which drops the drag.
+    func cancelDragSession() {
+        dragWindow?.orderOut(nil)
+        dragWindow = nil
+        dragArmed = false
+    }
+
     func apply(_ item: TabStripItem, index: Int) {
         selected = item.selected
+        groupMember = item.groupMember
         kind = item.kind
+        devtoolsTile = item.devtoolsTile
+        let tabWidth: CGFloat = (item.groupMember && item.memberCount >= 3) ? 140 : MonoMetrics.tabWidth
+        widthConstraint?.constant = tabWidth
+        braces.isHidden = !item.devtoolsTile
+        applyPrefix(item.titlePrefix, tabWidth: tabWidth)
+        if let glyph = item.splitGlyph {
+            splitMark.glyph = glyph
+            splitMark.pointSize = 12
+            splitMark.tint = Theme.mute
+            splitMark.isHidden = false
+            splitMarkWidth?.constant = 12
+            splitMarkGap?.constant = 4
+        } else {
+            splitMark.isHidden = true
+            splitMarkWidth?.constant = 0
+            splitMarkGap?.constant = 0
+        }
         toolTip = item.title
         badge.letter = item.badgeLetter
         badge.hex = item.badgeHex
@@ -330,13 +592,16 @@ final class TabItemView: NSView {
         titleField.font = item.kind == .terminal
             ? Theme.mono(size: MonoMetrics.terminalLabel)
             : Theme.font(size: MonoMetrics.tabLabel)
-        titleField.stringValue = item.title
-        titleField.textColor = item.selected ? Theme.text : Theme.mute
-        closeButton.contentTintColor = item.selected ? Theme.text : Theme.mute
+        titleField.stringValue = item.pageTitle ?? item.title
+        titleField.textColor = item.devtoolsTile ? memberTitleColor : memberTitleColor
+        if item.devtoolsTile {
+            prefixField.textColor = Theme.mute
+        }
+        closeButton.contentTintColor = memberTitleColor
         if let glyph = item.glyph {
             mark.glyph = glyph
             mark.pointSize = MonoMetrics.tabIcon
-            mark.tint = item.kind == .terminal ? Theme.termGlyph : (item.selected ? Theme.text : Theme.mute)
+            mark.tint = item.kind == .terminal ? Theme.termGlyph : (showsGroupStyle ? Theme.text : Theme.mute)
             mark.isHidden = false
             badge.isHidden = true
             imageView.isHidden = true
@@ -346,9 +611,19 @@ final class TabItemView: NSView {
             imageView.isHidden = !showImage
             badge.isHidden = showImage
         }
+        if item.devtoolsTile {
+            mark.isHidden = true
+            imageView.isHidden = true
+            badge.isHidden = true
+            braces.isHidden = false
+        }
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
-        setAccessibilityIdentifier("wyvern.tab.\(index)")
+        if item.devtoolsTile {
+            setAccessibilityIdentifier("wyvern.devtools.tab.\(index)")
+        } else {
+            setAccessibilityIdentifier("wyvern.tab.\(index)")
+        }
         setAccessibilityLabel(item.accessibilityLabel ?? item.title)
         if let value = item.accessibilityValue {
             setAccessibilityValue(value)
@@ -357,9 +632,17 @@ final class TabItemView: NSView {
             setAccessibilityHelp(help)
         }
         setAccessibilitySelected(item.selected)
-        closeButton.setAccessibilityIdentifier("wyvern.tab.\(index).close")
-        revealClose(item.selected || hovering)
+        if item.devtoolsTile {
+            closeButton.setAccessibilityIdentifier("wyvern.devtools.tab.\(index).close")
+        } else {
+            closeButton.setAccessibilityIdentifier("wyvern.tab.\(index).close")
+        }
+        revealClose(showsGroupStyle || hovering)
         needsDisplay = true
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        contextMenuProvider?()
     }
 
     override func accessibilityChildren() -> [Any]? {
@@ -367,14 +650,12 @@ final class TabItemView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Grouped tabs leave the fill to the capsule so members do not each draw a raised tab.
+        if groupMember { return }
         let path = Theme.tabPath(bounds, radius: MonoMetrics.tabRadius)
         if kind == .terminal {
-            if selected {
-                Theme.fillRaisedTab(top: Theme.termTabActive, bottom: Theme.termTab, path: path, in: bounds)
-            } else {
-                Theme.termTab.setFill()
-                path.fill()
-            }
+            Theme.termTab.setFill()
+            path.fill()
             Theme.termOutline.setStroke()
             path.lineWidth = 0.5
             path.stroke()
@@ -419,6 +700,7 @@ final class TabItemView: NSView {
         } else {
             dragOriginOnScreen = NSEvent.mouseLocation
         }
+        (window?.windowController as? BrowserWindowController)?.prepareTabDrag()
         onSelect?()
     }
 
@@ -432,6 +714,7 @@ final class TabItemView: NSView {
         } else {
             moveDragImage(to: screen)
         }
+        onDragChanged?(screen)
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -446,6 +729,7 @@ final class TabItemView: NSView {
         let offset = dragCursorInTab
         let id = tabID
         let controller = window?.windowController as? BrowserWindowController
+        let cancelled = controller?.consumeTileDragCancellation() ?? false
         dragWindow = nil
         dragArmed = false
         dragOriginInWindow = nil
@@ -457,7 +741,12 @@ final class TabItemView: NSView {
         guard (started || crossed), let controller else { return }
         DispatchQueue.main.async { [weak controller] in
             MainActor.assumeIsolated {
-                controller?.finishTabDrag(tabID: id, screenPoint: screen, cursorOffsetInTab: offset)
+                controller?.finishTabDrag(
+                    tabID: id,
+                    screenPoint: screen,
+                    cursorOffsetInTab: offset,
+                    cancelled: cancelled
+                )
             }
         }
     }
@@ -559,21 +848,61 @@ final class TabItemView: NSView {
         tracking = area
     }
 
+    func setPartnerHighlight(_ on: Bool) {
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.12
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            partnerRing.animator().alphaValue = on ? 1 : 0
+        }
+    }
+
+    private func applyPrefix(_ prefix: String?, tabWidth: CGFloat) {
+        let show = devtoolsTile && prefix != nil && tabWidth >= 120
+        if show, let prefix {
+            prefixWidth?.isActive = false
+            prefixField.stringValue = prefix
+            prefixField.isHidden = false
+            prefixField.textColor = Theme.mute
+            prefixGap?.constant = 4
+        } else {
+            prefixField.stringValue = ""
+            prefixField.isHidden = true
+            prefixGap?.constant = 0
+            prefixWidth?.constant = 0
+            prefixWidth?.isActive = true
+        }
+    }
+
     override func mouseEntered(with event: NSEvent) {
         hovering = true
         revealClose(true)
+        onHover?(true)
     }
 
     override func mouseExited(with event: NSEvent) {
         hovering = false
-        revealClose(selected)
+        revealClose(showsGroupStyle)
+        onHover?(false)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
-        titleField.textColor = selected ? Theme.text : Theme.mute
-        mark.tint = kind == .terminal ? Theme.termGlyph : (selected ? Theme.text : Theme.mute)
+        titleField.textColor = memberTitleColor
+        splitMark.tint = Theme.mute
+        mark.tint = kind == .terminal ? Theme.termGlyph : (showsGroupStyle ? Theme.text : Theme.mute)
+    }
+
+    /// Focused member is full `text`. Other members are `text` at 75%. A tab outside the split stays `mute` until selected.
+    private var memberTitleColor: NSColor {
+        if groupMember {
+            return selected ? Theme.text : Theme.text.withAlphaComponent(0.75)
+        }
+        return selected ? Theme.text : Theme.mute
+    }
+
+    private var showsGroupStyle: Bool {
+        selected || groupMember
     }
 
     private func revealClose(_ show: Bool) {
@@ -629,4 +958,44 @@ final class TabDragImageWindow: NSWindow {
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+/// Ring around the tiled tabs. Dimmer while a non-member is selected; active-tab elevation when a member is.
+@MainActor
+final class SplitGroupCapsule: NSView {
+    var elevated = false {
+        didSet {
+            guard elevated != oldValue else { return }
+            needsDisplay = true
+        }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = false
+        isHidden = true
+        setAccessibilityElement(false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 2, dy: 2)
+        guard rect.width > 1, rect.height > 1 else { return }
+        let path = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
+        if elevated {
+            Theme.fillRaisedTab(top: Theme.tabA1, bottom: Theme.tabA2, path: path, in: rect)
+        } else {
+            Theme.accent.withAlphaComponent(0.10).setFill()
+            path.fill()
+        }
+        Theme.accent.withAlphaComponent(elevated ? 0.45 : 0.28).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
 }

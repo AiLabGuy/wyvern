@@ -102,4 +102,59 @@ final class UpdateZipInspectorTests: XCTestCase {
         assertRejected(Data(), .zipMalformed)
         assertRejected(Data("not a zip at all, just text".utf8), .zipMalformed)
     }
+
+    func testDataDescriptorAndLocalSizeMismatchRejected() {
+        var descriptor = goodEntries()
+        descriptor[0].flags = 0x0008
+        assertRejected(TestZip.build(descriptor), .unsupportedEntry(zipName.dmgName))
+        var mismatch = goodEntries()
+        mismatch[0].localUncompressedSize = 1
+        assertRejected(TestZip.build(mismatch), .zipMalformed)
+    }
+
+    func testZip64ExtraAndDivergentUnicodePathRejected() throws {
+        var zip64 = goodEntries()
+        zip64[0].centralExtra = TestZip.extraField(id: 0x0001, payload: Data())
+        assertRejected(TestZip.build(zip64), .unsupportedEntry("zip64"))
+
+        let name = Data(zipName.dmgName.utf8)
+        var samePayload = Data([1, 0, 0, 0, 0])
+        samePayload.append(name)
+        var same = goodEntries()
+        same[0].centralExtra = TestZip.extraField(id: 0x7075, payload: samePayload)
+        XCTAssertNoThrow(try UpdateZipInspector.inspect(TestZip.build(same), allowed: allowed))
+
+        var otherPayload = Data([1, 0, 0, 0, 0])
+        otherPayload.append(contentsOf: Data("other".utf8))
+        var other = goodEntries()
+        other[0].centralExtra = TestZip.extraField(id: 0x7075, payload: otherPayload)
+        assertRejected(TestZip.build(other), .pathTraversal("other"))
+    }
+
+    func testExtractedMemberLargerThanDeclaredIsRefused() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wyvern-zip-size-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("a.txt")
+        try Data("abcd".utf8).write(to: file)
+        let entry = ZipEntryInfo(
+            name: "a.txt",
+            method: 0,
+            compressedSize: 4,
+            uncompressedSize: 1,
+            localHeaderOffset: 0
+        )
+        XCTAssertThrowsError(try UpdatePackage.enforceExtractedSizes(["a.txt": file], declared: [entry])) { error in
+            XCTAssertEqual(error as? UpdatePackageError, .tooLarge)
+        }
+        let honest = ZipEntryInfo(
+            name: "a.txt",
+            method: 0,
+            compressedSize: 4,
+            uncompressedSize: 4,
+            localHeaderOffset: 0
+        )
+        XCTAssertNoThrow(try UpdatePackage.enforceExtractedSizes(["a.txt": file], declared: [honest]))
+    }
 }

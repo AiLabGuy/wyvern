@@ -11,13 +11,31 @@ struct TestZipEntry {
     var flags: UInt16 = 0
     /// Name written into the local header when it should differ from the central record.
     var localName: String?
+    var centralExtra: Data = Data()
+    var localExtra: Data = Data()
+    var localCompressedSize: UInt32?
+    var localUncompressedSize: UInt32?
 
-    init(_ name: String, _ data: Data, unixMode: UInt32 = 0o100644, flags: UInt16 = 0, localName: String? = nil) {
+    init(
+        _ name: String,
+        _ data: Data,
+        unixMode: UInt32 = 0o100644,
+        flags: UInt16 = 0,
+        localName: String? = nil,
+        centralExtra: Data = Data(),
+        localExtra: Data = Data(),
+        localCompressedSize: UInt32? = nil,
+        localUncompressedSize: UInt32? = nil
+    ) {
         self.name = name
         self.data = data
         self.unixMode = unixMode
         self.flags = flags
         self.localName = localName
+        self.centralExtra = centralExtra
+        self.localExtra = localExtra
+        self.localCompressedSize = localCompressedSize
+        self.localUncompressedSize = localUncompressedSize
     }
 }
 
@@ -32,6 +50,8 @@ enum TestZip {
             let localName = Data((entry.localName ?? entry.name).utf8)
             let crc = crc32(entry.data)
             let size = UInt32(entry.data.count)
+            let localCompressed = entry.localCompressedSize ?? size
+            let localUncompressed = entry.localUncompressedSize ?? size
             append32(&out, 0x0403_4b50)
             append16(&out, 20)
             append16(&out, entry.flags)
@@ -39,11 +59,12 @@ enum TestZip {
             append16(&out, 0)
             append16(&out, 0x0021)
             append32(&out, crc)
-            append32(&out, size)
-            append32(&out, size)
+            append32(&out, localCompressed)
+            append32(&out, localUncompressed)
             append16(&out, UInt16(localName.count))
-            append16(&out, 0)
+            append16(&out, UInt16(entry.localExtra.count))
             out.append(localName)
+            out.append(entry.localExtra)
             out.append(entry.data)
 
             append32(&central, 0x0201_4b50)
@@ -57,13 +78,14 @@ enum TestZip {
             append32(&central, size)
             append32(&central, size)
             append16(&central, UInt16(name.count))
-            append16(&central, 0)
+            append16(&central, UInt16(entry.centralExtra.count))
             append16(&central, 0)
             append16(&central, 0)
             append16(&central, 0)
             append32(&central, entry.unixMode << 16)
             append32(&central, offset)
             central.append(name)
+            central.append(entry.centralExtra)
         }
         let centralOffset = UInt32(out.count)
         out.append(central)
@@ -76,6 +98,14 @@ enum TestZip {
         append32(&out, centralOffset)
         append16(&out, 0)
         return out
+    }
+
+    static func extraField(id: UInt16, payload: Data) -> Data {
+        var data = Data()
+        append16(&data, id)
+        append16(&data, UInt16(payload.count))
+        data.append(payload)
+        return data
     }
 
     static func crc32(_ data: Data) -> UInt32 {
