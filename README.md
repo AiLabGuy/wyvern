@@ -12,18 +12,30 @@ See [AI-DISCLOSURE.md](AI-DISCLOSURE.md).
 
 Prebuilt disk images are attached to each release on the [Releases page](https://github.com/AiLabGuy/wyvern/releases). Download the latest `WyvernBrowser-<version>.dmg`, open it, and drag **Wyvern Browser.app** to Applications. The source for every release stays in this repository, so you can inspect it or [build it yourself](#build-and-install).
 
-**First launch:** the app is not signed with an Apple Developer ID or notarized, so macOS blocks a normal double-click the first time. Either:
+**First launch (important): this app is not signed with an Apple Developer ID and is not notarized.** Notarization needs a paid Apple Developer account, and this project does not have one. The build is only ad-hoc signed, so macOS Gatekeeper will warn the first time you open it. The warning is expected; it does not mean the file is damaged. Use one of these ways to open it (macOS 13 and later):
 
-- right-click (Control-click) **Wyvern Browser.app** in Applications, choose **Open**, then **Open** again in the dialog, or
-- remove the quarantine flag in Terminal:
+1. **macOS 15 (Sequoia) and later:** double-click **Wyvern Browser.app** once and dismiss the warning. Then open **System Settings > Privacy & Security**, scroll to **Security**, click **Open Anyway** next to "Wyvern Browser", and confirm. (Control-click > Open no longer bypasses the warning on macOS 15.)
+2. **macOS 13 and 14:** Control-click (right-click) **Wyvern Browser.app** in Applications, choose **Open**, then **Open** again. Or use **System Settings > Privacy & Security > Open Anyway** as above.
+3. **Any version, Terminal:** remove the quarantine flag, then open the app normally:
 
-  ```bash
-  xattr -dr com.apple.quarantine "/Applications/Wyvern Browser.app"
-  ```
+   ```bash
+   xattr -dr com.apple.quarantine "/Applications/Wyvern Browser.app"
+   ```
 
-Each release also carries a `.sha256` file; check the download with `shasum -a 256 -c WyvernBrowser-<version>.dmg.sha256`.
+Check your download first: each release lists a SHA-256 for the DMG and the source archive. Compare with `shasum -a 256 WyvernBrowser-<version>.dmg`.
+
+Each release also carries a `.sha256` file; check the download with `shasum -a 256 -c WyvernBrowser-<version>.dmg.sha256`. The source tree of each release is attached as `wyvern-<version>-source.tar.gz` with its own SHA-256.
 
 ## Screenshots
+
+New in 0.1.0:
+
+| | |
+|---|---|
+| ![Main window](docs/screenshots/08-main-window.png)<br>A page in the single-bar window. | ![Split view](docs/screenshots/09-split-view.png)<br>Split view: two panes with their tabs grouped in the strip. |
+| ![Block list](docs/screenshots/10-block-list.png)<br>The block list settings (off by default). | ![Settings](docs/screenshots/11-settings-appearance.png)<br>Settings. |
+
+Earlier screenshots:
 
 | | |
 |---|---|
@@ -38,10 +50,13 @@ Each release also carries a `.sha256` file; check the download with `shasum -a 2
 - **Web and terminal tabs in one tab strip.** Terminal tabs run a local shell (via [SwiftTerm](https://github.com/migueldeicaza/SwiftTerm)), and you can save terminal bookmarks.
 - **Network health insight.** A per-site health badge and a health window, backed by TCP-connect and ICMP probes, system DNS lookups, and traceroute.
 - **Bookmark import** from other browsers' profiles and from HTML bookmark files.
+- **Tiling (split view).** Two to four panes in one window, five layouts, control-command shortcuts; panes can hold any mix of web, terminal, and developer-tools tabs.
+- **Developer tools as a tab.** Web Inspector (private WebKit interface) opens next to the page it inspects. Off until you turn it on in settings.
+- **Block list.** An ads-and-trackers host block list compiled to WebKit content rules, with a toolbar blocked-count badge and per-site pause. Off by default; lists are only downloaded when you turn it on.
 - **Session restore**, **tab search**, and a downloads manager.
 - **Per-site permissions**: camera and microphone prompts with remembered choices, plus cookie and site-data controls.
 - **Choice of search engine**: DuckDuckGo, Google, Bing, Kagi, Startpage, or a custom one.
-- **A signed, opt-in updater.** It checks only when you ask, and it installs only updates signed with the pinned minisign key.
+- **A signed, opt-in updater (work in progress, see [Updating](#updating)).** It checks only when you ask, and it installs only updates signed with the pinned minisign key.
 
 ## Requirements
 
@@ -55,8 +70,8 @@ Each release also carries a `.sha256` file; check the download with `shasum -a 2
 git clone https://github.com/AiLabGuy/wyvern.git
 cd wyvern
 
-swift build -c release --product App1   # compile only
-swift test --filter App1CoreTests       # unit tests
+swift build -c release --product Wyvern   # compile only
+swift test --filter WyvernCoreTests       # unit tests
 bash scripts/build-app.sh               # builds "build/Wyvern Browser.app" (ad-hoc signed)
 bash scripts/make-dmg.sh                # optional: disk image from the built app
 ```
@@ -66,6 +81,8 @@ To install, copy `build/Wyvern Browser.app` into `/Applications`. You can also o
 The product name, bundle ID, and version live in `config/product.env`. Change `BUNDLE_ID` (default `com.example.wyvern`) before you distribute your own build.
 
 ## Updating
+
+**Status:** the updater is a work in progress. It already handles GitHub release download links and any `latest.json` feed on public HTTPS (GitHub, Gitea, or your own web server), but **the v0.1.0 download has no built-in update source and no release signing key**, so it will not find updates by itself. Until a signed release exists, download new versions from the Releases page, or point Wyvern at your own signed source in **Settings > Updates** (see [Using your own update source](#using-your-own-update-source)).
 
 ### In-app updates (default source: GitHub Releases)
 
@@ -118,8 +135,12 @@ You can serve updates from your own GitHub Releases, a Gitea generic package, or
    - GitHub Releases: push a `v<version>` tag and let `.github/workflows/release.yml` do it (repo secrets `MINISIGN_SECRET_KEY`, `MINISIGN_PASSWORD`). Feed URL: `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`.
    - Gitea generic package: upload both files to one package version, e.g. `https://gitea.example.com/api/packages/<owner>/generic/wyvern/latest/latest.json` (the package must be public).
    - Any HTTPS host: put both files in one folder.
-   Sign and package each release as shown in [docs/UPDATES.md](docs/UPDATES.md), and check it with `swift run App1UpdateVerify` before publishing.
+   Sign and package each release as shown in [docs/UPDATES.md](docs/UPDATES.md), and check it with `swift run WyvernUpdateVerify` before publishing.
 4. **Point Wyvern at it.** Either open **Settings > Updates** and enter the feed URL and public key (they are saved together; **Reset to Default** goes back), or set `UPDATE_FEED_URL` and `UPDATE_PUBLIC_KEY` in `config/product.env` and rebuild. Values in `config/product.env` take precedence over the environment. A release build accepts only a public `https://host[:port]/path` URL with no user info, query, fragment, or private/local host.
+
+## Security
+
+Read [SECURITY.md](SECURITY.md) for how to report a vulnerability and [docs/SECURITY-REPORT.md](docs/SECURITY-REPORT.md) for what was reviewed before v0.1.0, what was found and fixed, and the known limitations. The review was done by an automated multi-agent sweep of AI-generated code. It was not an audit by a third party, and nothing there should be read as a claim that Wyvern is secure.
 
 ## License
 

@@ -21,9 +21,9 @@ Icon requests use an ephemeral session. A redirect that leaves the page host is 
 
 ## Storage on this Mac
 
-Bookmarks are a JSON file under Application Support for `com.example.wyvern`. Settings are stored in UserDefaults. Icons may be cached in memory and in that same Application Support folder. Downloaded files are written only to `~/Downloads` on this Mac (or a directory chosen with `--app1-downloads-dir`). The in-app download list stays in memory for the session and is not written to disk.
+Bookmarks are a JSON file under Application Support for `com.example.wyvern`. Settings are stored in UserDefaults. Icons may be cached in memory and in that same Application Support folder. Downloaded files are written only to `~/Downloads` on this Mac (or a directory chosen with `--wyvern-downloads-dir`). The in-app download list stays in memory for the session and is not written to disk.
 
-A first launch after the rename copies those files and settings from the previous Application Support folder when the new folder does not exist. `--app1-data-dir` skips that copy.
+A first launch after the rename copies those files and settings from the previous Application Support folder when the new folder does not exist. `--wyvern-data-dir` skips that copy.
 
 Clear Browsing Data removes site data kept by the system web view and deletes the icon cache. Bookmarks are kept. Delete All Bookmarks is a separate action and asks for confirmation first.
 

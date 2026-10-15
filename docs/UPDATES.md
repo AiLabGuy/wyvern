@@ -40,7 +40,7 @@ Each refusal is shown in plain language, and details go to `update.log` in the a
 An update source is a URL plus the minisign public key that must sign every update from it.
 
 - **Built-in source**: `UPDATE_FEED_URL` and `UPDATE_PUBLIC_KEY` in `config/product.env`, baked
-  into Info.plist as `App1UpdateFeedURL` and `App1UpdatePublicKey`.
+  into Info.plist as `WyvernUpdateFeedURL` and `WyvernUpdatePublicKey`.
 - **Custom source**: entered in **Settings > Updates** and kept in user defaults. A URL and a key are
   always saved together. The URL must be `https://`, with no user name or password. The key must be
   a minisign public key: the 56-character line that starts with `RWQ`. You can also paste the whole
@@ -145,7 +145,7 @@ so the zip is fetched from `releases/latest/download/<zip>` too.
    ```
 
    Keep the secret key off the web host, ideally on the build machine only (mode 0600).
-   `App1UpdateSigner` does not generate a key. It signs only with the seed in
+   `WyvernUpdateSigner` does not generate a key. It signs only with the seed in
    `UPDATE_SIGNING_KEY_FILE` (default `~/Library/Application Support/WyvernBuild/update-signing.key`),
    which must be mode 0600 in a directory owned by the build user with no group or other access,
    and it refuses a seed whose public key is not `UPDATE_PUBLIC_KEY`. See [SECURITY.md](../SECURITY.md).
@@ -176,7 +176,7 @@ so the zip is fetched from `releases/latest/download/<zip>` too.
 5. **Check it before you publish:**
 
    ```bash
-   swift run App1UpdateVerify --zip "build/${DMG_BASENAME}-${VERSION}-b42.zip" \
+   swift run WyvernUpdateVerify --zip "build/${DMG_BASENAME}-${VERSION}-b42.zip" \
      --plist "build/${APP_BUNDLE}/Contents/Info.plist" \
      --feed latest.json --feed-url https://example.com/wyvern/latest.json
    ```

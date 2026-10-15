@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: 2026 Wyvern Contributors
 # SPDX-License-Identifier: MIT
 
-"""Write synthetic bookmark import fixtures under Tests/App1CoreTests/Fixtures."""
+"""Write synthetic bookmark import fixtures under Tests/WyvernCoreTests/Fixtures."""
 
 import sqlite3
 import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FIXTURES = ROOT / "Tests" / "App1CoreTests" / "Fixtures"
+FIXTURES = ROOT / "Tests" / "WyvernCoreTests" / "Fixtures"
 
 
 def write_places(path: Path) -> None:

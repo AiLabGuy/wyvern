@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Wyvern Contributors
 # SPDX-License-Identifier: MIT
 
-name: App1
+name: Wyvern
 packages:
   SwiftTerm:
     url: https://github.com/migueldeicaza/SwiftTerm
@@ -26,35 +26,35 @@ settings:
     Debug:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) WYVERN_DEV_UPDATER"
 targets:
-  App1Core:
+  WyvernCore:
     type: library.static
     platform: macOS
     sources:
-      - path: Sources/App1Core
+      - path: Sources/WyvernCore
     settings:
-      PRODUCT_NAME: App1Core
-      PRODUCT_MODULE_NAME: App1Core
+      PRODUCT_NAME: WyvernCore
+      PRODUCT_MODULE_NAME: WyvernCore
       PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern.core
       DEFINES_MODULE: YES
       GENERATE_INFOPLIST_FILE: YES
       SKIP_INSTALL: YES
       OTHER_LDFLAGS: "$(inherited) -lsqlite3"
-  App1:
+  Wyvern:
     type: application
     platform: macOS
     sources:
-      - path: Sources/App1
+      - path: Sources/Wyvern
     dependencies:
-      - target: App1Core
+      - target: WyvernCore
       - package: SwiftTerm
         product: SwiftTerm
     settings:
       PRODUCT_NAME: Wyvern Browser
-      PRODUCT_MODULE_NAME: App1
+      PRODUCT_MODULE_NAME: Wyvern
       PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern
       GENERATE_INFOPLIST_FILE: NO
       INFOPLIST_FILE: Resources/Info.plist
-      CODE_SIGN_ENTITLEMENTS: App1.entitlements
+      CODE_SIGN_ENTITLEMENTS: Wyvern.entitlements
       CODE_SIGN_STYLE: Manual
       CODE_SIGN_IDENTITY: "-"
       ENABLE_HARDENED_RUNTIME: YES
@@ -71,34 +71,34 @@ targets:
           mkdir -p "${dest}"
           cp "${SRCROOT}/LICENSE" "${SRCROOT}/NOTICE" "${SRCROOT}/THIRD_PARTY_LICENSES.md" "${dest}/"
           cp "${SRCROOT}/build/AppIcon.icns" "${dest}/AppIcon.icns"
-  App1CoreTests:
+  WyvernCoreTests:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - path: Tests/App1CoreTests
+      - path: Tests/WyvernCoreTests
         excludes:
           - Fixtures
     resources:
-      - path: Tests/App1CoreTests/Fixtures
+      - path: Tests/WyvernCoreTests/Fixtures
         type: folder
     dependencies:
-      - target: App1Core
+      - target: WyvernCore
     settings:
-      PRODUCT_NAME: App1CoreTests
+      PRODUCT_NAME: WyvernCoreTests
       PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern.tests
       GENERATE_INFOPLIST_FILE: YES
       TEST_HOST: ""
       OTHER_LDFLAGS: "$(inherited) -lsqlite3"
 schemes:
-  App1:
+  Wyvern:
     build:
       targets:
-        App1: all
-        App1Core: all
-        App1CoreTests: [test]
+        Wyvern: all
+        WyvernCore: all
+        WyvernCoreTests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
-        - App1CoreTests
+        - WyvernCoreTests

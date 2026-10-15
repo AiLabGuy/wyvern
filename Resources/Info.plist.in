@@ -90,15 +90,15 @@
 			</array>
 		</dict>
 	</array>
-	<key>App1GitCommit</key>
-	<string>@APP1_GIT_COMMIT@</string>
-	<key>App1UpdateFeedURL</key>
+	<key>WyvernGitCommit</key>
+	<string>@WYVERN_GIT_COMMIT@</string>
+	<key>WyvernUpdateFeedURL</key>
 	<string>@UPDATE_FEED_URL@</string>
-	<key>App1UpdatePublicKey</key>
+	<key>WyvernUpdatePublicKey</key>
 	<string>@UPDATE_PUBLIC_KEY@</string>
-	<key>App1UpdateDevSource</key>
+	<key>WyvernUpdateDevSource</key>
 	<string>@UPDATE_DEV_SOURCE@</string>
-	<key>App1DMGBasename</key>
+	<key>WyvernDMGBasename</key>
 	<string>@DMG_BASENAME@</string>
 </dict>
 </plist>

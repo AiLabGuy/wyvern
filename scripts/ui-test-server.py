@@ -64,12 +64,43 @@ def wav_bytes():
 
 TONE = wav_bytes()
 
+# ads.blocktest.localhost does not resolve on an offline Mac. The hosts line points it at
+# 0.0.0.0 so a custom block list can count the three images. The page itself stays on loopback.
+HOSTS_TXT = b"0.0.0.0 ads.blocktest.localhost\n"
+
+
+def blocked_page(port):
+    image = f"http://ads.blocktest.localhost:{port}/x.png"
+    body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blocked test page</title>
+</head>
+<body>
+<p>Blocked test page</p>
+<img src="{image}" alt="blocked-1">
+<img src="{image}" alt="blocked-2">
+<img src="{image}" alt="blocked-3">
+<img src="/bench.png" alt="allowed">
+</body>
+</html>
+"""
+    return body.encode("utf-8")
+
 
 class FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         name = unquote(urlparse(self.path).path.lstrip("/"))
         if name == "tone.wav":
             self._send(200, TONE, {"Content-Type": "audio/wav"})
+            return
+        if name == "test-hosts.txt":
+            self._send(200, HOSTS_TXT, {"Content-Type": "text/plain; charset=utf-8"})
+            return
+        if name == "blocked.html":
+            port = self.server.server_address[1]
+            self._send(200, blocked_page(port), {"Content-Type": "text/html; charset=utf-8"})
             return
         if name in HTML or name in BINS or name in IMAGES or name == "attach.bin":
             path = FIXTURES / name
@@ -147,6 +178,30 @@ def check_fixture(base, name, expect):
     return ""
 
 
+def check_blocked(base, port):
+    url = base + "/blocked.html"
+    try:
+        with urlopen(url, timeout=5) as response:
+            status = response.status
+            headers = dict(response.headers.items())
+            body = response.read()
+    except URLError as error:
+        return f"blocked.html request failed: {error}"
+    if status != 200:
+        return f"blocked.html status {status}"
+    content_type = header_value(headers, "Content-Type")
+    if "text/html" not in content_type:
+        return f"blocked.html content-type {content_type}"
+    image = f"http://ads.blocktest.localhost:{port}/x.png".encode("utf-8")
+    if body.count(image) != 3:
+        return f"blocked.html blocked images {body.count(image)}"
+    if b'src="/bench.png"' not in body:
+        return "blocked.html allowed image missing"
+    if b"Blocked test page" not in body:
+        return "blocked.html body missing marker"
+    return ""
+
+
 def self_test():
     server = make_server()
     port = server.server_address[1]
@@ -165,6 +220,7 @@ def self_test():
         ("blob.bin", {"type": "application/octet-stream"}),
         ("data.bin", {"type": "application/octet-stream"}),
         ("tone.wav", {"type": "audio/wav", "prefix": b"RIFF"}),
+        ("test-hosts.txt", {"type": "text/plain", "body": HOSTS_TXT.strip()}),
     ]
     failures = []
     try:
@@ -175,6 +231,12 @@ def self_test():
                 print(f"SELF_TEST {name} FAIL {reason}")
             else:
                 print(f"SELF_TEST {name} PASS")
+        blocked_reason = check_blocked(base, port)
+        if blocked_reason:
+            failures.append(blocked_reason)
+            print(f"SELF_TEST blocked.html FAIL {blocked_reason}")
+        else:
+            print("SELF_TEST blocked.html PASS")
     finally:
         server.shutdown()
         server.server_close()

@@ -37,7 +37,7 @@ set +a
 : "${UPDATE_PUBLIC_KEY:=}"
 : "${UPDATE_DEV_SOURCE:=}"
 : "${BUILD_NUMBER:=1}"
-: "${APP1_GIT_COMMIT:=}"
+: "${WYVERN_GIT_COMMIT:=}"
 
 generate_info_plist() {
   local dest="$1"
@@ -53,7 +53,7 @@ generate_info_plist() {
       -e "s|@VERSION@|${VERSION}|g" \
       -e "s|@BUILD_NUMBER@|${BUILD_NUMBER}|g" \
       -e "s|@EXECUTABLE_NAME@|${EXECUTABLE_NAME}|g" \
-      -e "s|@APP1_GIT_COMMIT@|${APP1_GIT_COMMIT}|g" \
+      -e "s|@WYVERN_GIT_COMMIT@|${WYVERN_GIT_COMMIT}|g" \
       -e "s|@UPDATE_FEED_URL@|${UPDATE_FEED_URL}|g" \
       -e "s|@UPDATE_PUBLIC_KEY@|${UPDATE_PUBLIC_KEY}|g" \
       -e "s|@UPDATE_DEV_SOURCE@|${UPDATE_DEV_SOURCE}|g" \

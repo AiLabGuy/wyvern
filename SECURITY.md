@@ -1,16 +1,18 @@
 # Security
 
-## Reporting
+## Reporting a vulnerability
 
-Report a vulnerability in private to security@placeholder.invalid.
+Please report a vulnerability **privately** through GitHub: open the repository's **Security** tab and choose **Report a vulnerability** (GitHub private vulnerability reporting). Do not open a public issue or pull request for an undisclosed vulnerability.
 
-Do not open a public issue for an undisclosed vulnerability. Include steps to reproduce and the version you ran. You will receive an acknowledgement, and a fix will be prepared before public discussion.
+Include the version you ran (Wyvern Browser > About), your macOS version, and steps to reproduce. This is a small volunteer project: expect an acknowledgement within about a week, and a fix prepared before public discussion where one is possible. There is no bug bounty.
+
+What was reviewed before v0.1.0, how, and what is still known to be weak is in [docs/SECURITY-REPORT.md](docs/SECURITY-REPORT.md).
 
 ## Supported versions
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | yes |
+| 0.1.x | yes (latest release only) |
 | older | no |
 
 Wyvern Browser runs on macOS 13 and later.
@@ -33,7 +35,7 @@ Before the installed `.app` is replaced, `codesign --verify --deep --strict -R '
 
 ## Update signing key (CI)
 
-The private update-signing seed lives in a key file outside the checkout. The path comes from `UPDATE_SIGNING_KEY_FILE` and defaults to `~/Library/Application Support/WyvernBuild/update-signing.key`. The directory is mode 0700. The file is created with `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` and then `fchmod` to 0600, so it is never overwritten and umask cannot loosen or tighten it. `App1UpdateSigner` refuses a key file that is not a regular file owned by the build user with mode exactly 0600, or whose directory is not a real directory owned by the build user with no group or other access (`UPDATE_KEY_INSECURE`). It opens the file with `O_NOFOLLOW` and re-checks owner, mode, and identity on the open descriptor, and it refuses a path inside the checkout or `GITHUB_WORKSPACE` (`UPDATE_KEY_IN_WORKSPACE`).
+The private update-signing seed lives in a key file outside the checkout. The path comes from `UPDATE_SIGNING_KEY_FILE` and defaults to `~/Library/Application Support/WyvernBuild/update-signing.key`. The directory is mode 0700. The file is created with `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` and then `fchmod` to 0600, so it is never overwritten and umask cannot loosen or tighten it. `WyvernUpdateSigner` refuses a key file that is not a regular file owned by the build user with mode exactly 0600, or whose directory is not a real directory owned by the build user with no group or other access (`UPDATE_KEY_INSECURE`). It opens the file with `O_NOFOLLOW` and re-checks owner, mode, and identity on the open descriptor, and it refuses a path inside the checkout or `GITHUB_WORKSPACE` (`UPDATE_KEY_IN_WORKSPACE`).
 
 CI reads only that file, so it never waits on a keychain dialog. The keychain is read in two cases only:
 

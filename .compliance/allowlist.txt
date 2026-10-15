@@ -7,10 +7,10 @@ NOTICE:cef:uses the system WKWebView and bundles no
 NOTICE:electron:uses the system WKWebView and bundles no
 NOTICE:grok:Created with Grok
 CODE_OF_CONDUCT.md:cef:gracefully
-Sources/App1/BookmarkImportSheetController.swift:affiliate:not affiliated
-Sources/App1Core/AppInfo.swift:affiliate:not affiliated
+Sources/Wyvern/BookmarkImportSheetController.swift:affiliate:not affiliated
+Sources/WyvernCore/AppInfo.swift:affiliate:not affiliated
 # Public WebKit property. The three letters sit inside this identifier.
-Sources/App1/BrowserTab.swift:cef:sourceFrame
+Sources/Wyvern/BrowserTab.swift:cef:sourceFrame
 ASSETS.md:grok:Provenance: Initial concept generated with Grok Imagine (SpaceXAI)
 ASSETS.md:xai:Provenance: Initial concept generated with Grok Imagine (SpaceXAI)
 ASSETS.md:grok:a prior Grok-generated reference; Created with Grok.
