@@ -51,7 +51,18 @@ enum MonoMetrics {
     static let lockIcon: CGFloat = 13
     static let netHealthBadgeHeight: CGFloat = 24
     static let netHealthBadgeRadius: CGFloat = 12
+    /// Split view. Names match the tiling spec.
+    static let paneRing: CGFloat = 2
+    static let dividerVisual: CGFloat = 1
+    static let dividerHit: CGFloat = 8
+    static let paneMinWidth: CGFloat = 320
+    static let paneMinHeight: CGFloat = 200
+    static let snapTolerance: CGFloat = 8
     static let netHealthPanelWidth: CGFloat = 300
+    /// Toolbar blocked-count badge. Same height as net health, its own shape.
+    static let blockBadgeHeight: CGFloat = 24
+    static let blockBadgeMinWidth: CGFloat = 24
+    static let blockPopoverWidth: CGFloat = 280
     static let barTrailing: CGFloat = 8
     static let sidebarWidth: CGFloat = 240
     /// S1 settings sidebar, including the Terminal row.
@@ -106,6 +117,10 @@ enum Theme {
     static let termDim = token("wyvern.termDim", \.termDim)
     static let termOutline = tokenAlpha("wyvern.termOutline", color: \.termOutline, alpha: \.termOutlineAlpha)
     static let destructive = color(hex: "#E5484D")
+    /// Cobalt fill for the blocked-count badge. Dark #4C6FE0, light #2F5BEA.
+    static let blockTint = dynamic("wyvern.blockTint", "#2F5BEA", "#4C6FE0")
+    /// Error ink. Dark #FF6B6B, light #C62828. Not used for ordinary status.
+    static let danger = dynamic("wyvern.danger", "#C62828", "#FF6B6B")
 
     static func font(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         NSFont.systemFont(ofSize: size, weight: weight)
@@ -271,6 +286,14 @@ enum FieldFrame {
 
 @MainActor
 final class PageBackdrop: NSView {
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // A layer keeps the page color on screen while a WKWebView is moved between parents.
+        if !wantsLayer {
+            wantsLayer = true
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         Theme.page.setFill()
         dirtyRect.fill()

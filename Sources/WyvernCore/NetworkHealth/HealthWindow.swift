@@ -33,4 +33,10 @@ public struct HealthWindow: Equatable, Sendable {
     public func stats(at now: Date) -> HealthStats {
         HealthStats.compute(from: samples(at: now))
     }
+
+    /// Puts a pane's saved samples back so a focus change does not start from an empty window.
+    public mutating func restore(_ samples: [HealthSample], now: Date) {
+        self.samples = samples
+        expire(now: now)
+    }
 }

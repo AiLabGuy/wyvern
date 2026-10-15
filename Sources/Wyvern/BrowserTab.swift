@@ -24,6 +24,19 @@ enum TabSurface: Equatable {
     case newTab
 }
 
+extension WebContentSurface {
+    init(_ surface: TabSurface) {
+        switch surface {
+        case .web:
+            self = .web
+        case .bookmarks:
+            self = .bookmarks
+        case .newTab:
+            self = .newTab
+        }
+    }
+}
+
 extension BrowserTab {
     var kind: TabKind { .web }
 }
@@ -63,16 +76,28 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     /// True from `load()` or a main-frame link click until that navigation commits, finishes, or fails.
     private var userInitiatedNavigation = false
     private var currentNavigation: WKNavigation?
+    /// URL of the last committed document. Provisional `webView.url` is not shown over it.
+    private var committedURL: URL?
+    /// The address the person just submitted. Kept until that load commits or fails.
+    private var showingTypedTarget = false
 
     private var observations: [NSKeyValueObservation] = []
     private var didShutdown = false
     private var faviconGeneration = 0
     private var pendingMediaCancel: (() -> Void)?
     private var pendingMediaOriginHost: String?
+    private var popupTimes: [Date] = []
     private let benchHandler: BenchPaintHandler
+    private let probeHandler: BlockListProbeHandler
     private var benchDidFinish = false
     private var benchDidRAF = false
     private var cookieObserver: NSObjectProtocol?
+    private var developerToolsObserver: NSObjectProtocol?
+    private var blockRulesObserver: NSObjectProtocol?
+    /// Main-frame allows waiting for `didStartProvisionalNavigation`, so iframe loads do not clear the count.
+    private var mainFrameStartsPending = 0
+    private var probeSeen = Set<String>()
+    private(set) var blockedRequestCount = 0
 
     static let blankURL: URL = {
         if let url = URL(string: "about:blank") {
@@ -100,6 +125,9 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     static var defaultFontSize = 16
     /// Page zoom percent applied with `WKWebView.pageZoom`.
     static var defaultZoomPercent = 100
+    /// When true, ordinary web pages are inspectable. Internal pages stay closed.
+    /// Set at launch and when Show Develop menu changes. Off until that setting is on.
+    static var developerToolsEnabled = false
 
     /// WebKit preference keys that turn off GPU canvas and WebGL. Each is set only if KVC accepts it.
     static let softwareRenderingKeys = ["acceleratedDrawingEnabled", "canvasUsesAcceleratedDrawing", "webGLEnabled"]
@@ -169,22 +197,25 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     init(configuration: WKWebViewConfiguration, host: BrowserTabHost, surface: TabSurface = .newTab) {
         let handler = BenchPaintHandler()
         Self.installBenchHooks(on: configuration, handler: handler)
+        let probe = BlockListProbeHandler()
+        BlockListProbe.installHandler(on: configuration.userContentController, handler: probe)
         benchHandler = handler
+        probeHandler = probe
         webView = WKWebView(frame: .zero, configuration: configuration)
         self.host = host
         self.surface = surface
         super.init()
         handler.owner = self
+        probe.owner = self
         BenchMarks.emitOnce("web-view-created")
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        // No context-menu hook. WebKit adds Inspect Element when developer extras are on.
         webView.allowsBackForwardNavigationGestures = true
-        if #available(macOS 13.3, *) {
-            webView.isInspectable = false
-        }
         if surface != .web {
             applySurface()
         }
+        applyInspectability()
         applyPageMetrics(fontSize: Self.defaultFontSize, zoomPercent: Self.defaultZoomPercent)
         installCookieRules()
         cookieObserver = NotificationCenter.default.addObserver(
@@ -196,7 +227,44 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
                 self?.installCookieRules()
             }
         }
+        developerToolsObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernDeveloperToolsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let enabled = DeveloperTools.enabled(from: note)
+            Task { @MainActor in
+                if let enabled {
+                    BrowserTab.developerToolsEnabled = enabled
+                }
+                self?.applyInspectability()
+            }
+        }
+        blockRulesObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernBlockRulesDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.installCookieRules()
+            }
+        }
         startObserving()
+    }
+
+    /// Matches `isInspectable` and `developerExtrasEnabled` to the surface and the setting.
+    /// `isInspectable` is the documented switch on macOS 13.3 and later. The preference key
+    /// is written only when `WKPreferences` responds to a setter, so an unknown key cannot raise.
+    func applyInspectability() {
+        guard !didShutdown else { return }
+        let enabled = DeveloperTools.shouldBeInspectable(
+            surface: WebContentSurface(surface),
+            setting: Self.developerToolsEnabled
+        )
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = enabled
+        }
+        WebInspectorPreferences.setDeveloperExtrasEnabled(enabled, on: webView.configuration.preferences)
     }
 
     /// Zoom uses `pageZoom`. Font size uses `_setTextZoomFactor:` when WebKit implements it,
@@ -217,6 +285,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             }
         }
         Self.installBenchScript(on: controller)
+        BlockListProbe.installScript(on: controller)
     }
 
     func installCookieRules() {
@@ -253,16 +322,20 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func load(url: URL, userTypedFile: Bool) {
+        resetBlockedRequestCount()
         cancelPendingMedia()
         if let page = InternalPage.parse(url) {
             userInitiatedNavigation = false
+            showingTypedTarget = false
             show(page)
             return
         }
         surface = .web
+        applyInspectability()
         faviconGeneration += 1
         favicon = nil
         displayedURL = url
+        showingTypedTarget = true
         isLoading = true
         estimatedProgress = 0
         userInitiatedNavigation = true
@@ -285,11 +358,13 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func show(_ page: InternalPage) {
+        resetBlockedRequestCount()
         cancelPendingMedia()
         surface = page == .bookmarks ? .bookmarks : .newTab
         faviconGeneration += 1
         favicon = nil
         applySurface()
+        applyInspectability()
         host?.browserTabDidUpdate(self, progressOnly: false)
         host?.browserTabDidSettle(self)
         webView.stopLoading()
@@ -327,12 +402,23 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             NotificationCenter.default.removeObserver(cookieObserver)
             self.cookieObserver = nil
         }
+        if let developerToolsObserver {
+            NotificationCenter.default.removeObserver(developerToolsObserver)
+            self.developerToolsObserver = nil
+        }
+        if let blockRulesObserver {
+            NotificationCenter.default.removeObserver(blockRulesObserver)
+            self.blockRulesObserver = nil
+        }
         if BenchMarks.isEnabled {
             webView.configuration.userContentController.removeScriptMessageHandler(forName: "wyvernBench")
         }
+        BlockListProbe.removeHandler(from: webView.configuration.userContentController)
+        ContentRuleCoordinator.shared.forget(webView.configuration)
         webView.stopLoading()
         webView.removeFromSuperview()
         benchHandler.owner = nil
+        probeHandler.owner = nil
         host = nil
     }
 
@@ -363,7 +449,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         guard !didShutdown, surface == .web else { return }
         let rawTitle = webView.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let newTitle = rawTitle.isEmpty ? "New Tab" : rawTitle
-        let newURL = webView.url
+        let newURL = visibleURL(candidate: webView.url, loading: webView.isLoading)
         let previousHost = displayedURL?.host
         let newBack = webView.canGoBack
         let newForward = webView.canGoForward
@@ -392,8 +478,26 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         }
     }
 
+    /// While a provisional load is in flight the document is still the previous page.
+    /// A page-started navigation keeps that page's URL until `didCommit`.
+    private func visibleURL(candidate: URL?, loading: Bool) -> URL? {
+        switch AddressCommit.choice(showingTypedTarget: showingTypedTarget, loading: loading) {
+        case .keepDisplayed:
+            return displayedURL
+        case .keepCommitted:
+            return committedURL ?? displayedURL
+        case .adoptCandidate:
+            committedURL = candidate
+            return candidate
+        }
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         currentNavigation = navigation
+        if mainFrameStartsPending > 0 {
+            mainFrameStartsPending -= 1
+            resetBlockedRequestCount()
+        }
         if BenchMarks.isEnabled {
             benchDidFinish = false
             benchDidRAF = false
@@ -404,6 +508,15 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         clearUserInitiated(navigation)
         cancelPendingMedia()
+        showingTypedTarget = false
+        if webView.url?.scheme?.lowercased() != "file" {
+            permittedFileURL = nil
+        }
+        if surface == .web {
+            committedURL = webView.url
+            displayedURL = webView.url
+            host?.browserTabDidUpdate(self, progressOnly: false)
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -422,6 +535,20 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         host?.browserTabDidSettle(self)
     }
 
+    func absorbProbeURLs(_ urls: [String]) {
+        let added = BlockListController.shared.consume(urls: urls, seen: &probeSeen)
+        guard added > 0 else { return }
+        blockedRequestCount += added
+        host?.browserTabDidUpdate(self, progressOnly: false)
+    }
+
+    private func resetBlockedRequestCount() {
+        guard blockedRequestCount != 0 || probeSeen.isEmpty == false else { return }
+        blockedRequestCount = 0
+        probeSeen.removeAll()
+        host?.browserTabDidUpdate(self, progressOnly: false)
+    }
+
     func handleBenchPaintMessage() {
         guard BenchMarks.isEnabled else { return }
         benchDidRAF = true
@@ -435,12 +562,20 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         _ = error
-        clearUserInitiated(navigation)
+        restoreCommittedURL(navigation)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         _ = error
+        restoreCommittedURL(navigation)
+    }
+
+    private func restoreCommittedURL(_ navigation: WKNavigation?) {
         clearUserInitiated(navigation)
+        showingTypedTarget = false
+        guard surface == .web else { return }
+        displayedURL = committedURL ?? webView.url
+        host?.browserTabDidUpdate(self, progressOnly: false)
     }
 
     private func clearUserInitiated(_ navigation: WKNavigation?) {
@@ -479,8 +614,11 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         decisionHandler: @escaping MediaCaptureDecisionHandler
     ) {
         _ = webView
-        _ = frame
         let key = MediaPermissionPolicy.originKey(scheme: origin.`protocol`, host: origin.host, port: origin.port)
+        if !MediaPermissionPolicy.allowsFrame(isMainFrame: frame.isMainFrame, requesterOrigin: key, topLevelURL: webView.url) {
+            decisionHandler(.deny)
+            return
+        }
         let kind: MediaCaptureKind
         switch type {
         case .camera:
@@ -530,6 +668,12 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         guard navigationAction.targetFrame == nil else { return nil }
         // Block is the only stored choice that refuses the new view. Ask stays on this path.
         if popupBlocked(navigationAction) {
+            return nil
+        }
+        let now = Date()
+        let burst = PopupFloodPolicy.admit(recent: popupTimes, now: now)
+        popupTimes = burst.retained
+        if !burst.allow {
             return nil
         }
         // Use the configuration WebKit passed in. Do not substitute the default one.
@@ -591,6 +735,12 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             return
         }
         let mainFrame = navigationAction.targetFrame?.isMainFrame ?? true
+        // The frame that asked, not the top document. An https iframe in a local
+        // page must not inherit that page's file grant.
+        // WebKit passes a nil source frame for loads the app starts itself, although the
+        // Swift type is non-optional. Reading it through KVC keeps that case from trapping.
+        let sourceFrame = navigationAction.value(forKey: "sourceFrame") as? WKFrameInfo
+        let sourceURL = sourceFrame?.request.url ?? webView.url
         if let page = InternalPage.parse(url) {
             decisionHandler(.cancel, preferences)
             if mainFrame {
@@ -605,11 +755,14 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
                 url: url,
                 isMainFrame: mainFrame,
                 userTypedFileURL: permittedFileURL,
-                currentPageURL: webView.url
+                currentPageURL: sourceURL
             )
         )
         switch decision {
         case .allow:
+            if mainFrame {
+                mainFrameStartsPending += 1
+            }
             decisionHandler(.allow, preferences)
         case .cancel:
             decisionHandler(.cancel, preferences)

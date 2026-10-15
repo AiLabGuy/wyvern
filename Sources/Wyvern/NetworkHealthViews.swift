@@ -224,17 +224,30 @@ final class NetworkHealthBadge: NSButton {
         addSubview(glyph)
         addSubview(trace)
         addSubview(label)
+        let glyphLeading = glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6)
+        let glyphWidth = glyph.widthAnchor.constraint(equalToConstant: 10)
+        let traceLeading = trace.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 4)
+        let traceWidth = trace.widthAnchor.constraint(equalToConstant: 28)
+        let labelLeading = label.leadingAnchor.constraint(equalTo: trace.trailingAnchor, constant: 4)
+        let labelTrailing = label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8)
+        // The toolbar pins this badge to width 0 while it is hidden. Required pins of
+        // 6+10+4+28+4+8 cannot reach 0, so AppKit logs an unsatisfiable chain.
+        // 999 still beats the label's compression resistance while the badge is at 92.
+        let yields = NSLayoutConstraint.Priority(rawValue: 999)
+        for constraint in [glyphLeading, glyphWidth, traceLeading, traceWidth, labelLeading, labelTrailing] {
+            constraint.priority = yields
+        }
         NSLayoutConstraint.activate([
-            glyph.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            glyphLeading,
             glyph.centerYAnchor.constraint(equalTo: centerYAnchor),
-            glyph.widthAnchor.constraint(equalToConstant: 10),
+            glyphWidth,
             glyph.heightAnchor.constraint(equalToConstant: 10),
-            trace.leadingAnchor.constraint(equalTo: glyph.trailingAnchor, constant: 4),
+            traceLeading,
             trace.centerYAnchor.constraint(equalTo: centerYAnchor),
-            trace.widthAnchor.constraint(equalToConstant: 28),
+            traceWidth,
             trace.heightAnchor.constraint(equalToConstant: 14),
-            label.leadingAnchor.constraint(equalTo: trace.trailingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            labelLeading,
+            labelTrailing,
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
         setAccessibilityRole(.button)

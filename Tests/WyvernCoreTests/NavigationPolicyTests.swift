@@ -27,6 +27,83 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(NavigationPolicy.decide(NavigationRequest(url: custom, isMainFrame: true)), .confirmExternal)
     }
 
+    func testShellOptionURLsAreNotConfirmed() throws {
+        let blocked = [
+            "ssh://-oProxyCommand=calc/example.com",
+            "ssh://%2DoProxyCommand%3Dcalc@example.com",
+            "ssh://%20-oProxyCommand@example.com",
+            "ssh://example.com/?Proxy%43ommand=calc",
+            "ssh://example.com#ProxyCommand",
+            "telnet://-n/example.com",
+            "ssh:///path",
+            "ssh://example.com/%0A-oBatchMode=yes",
+            "sftp://example.com/-oBatchMode=yes",
+            "scp://user@-evil.example/file",
+            "rlogin://example.com/?LocalCommand=id",
+            "rsh://example.com/?PermitLocalCommand=yes"
+        ]
+        for raw in blocked {
+            let url = try XCTUnwrap(URL(string: raw), raw)
+            XCTAssertFalse(ExternalLaunchPolicy.allowsConfirmation(url), raw)
+            XCTAssertEqual(
+                NavigationPolicy.decide(NavigationRequest(url: url, isMainFrame: true)),
+                .cancel,
+                raw
+            )
+        }
+        let benign = try XCTUnwrap(URL(string: "ssh://example.com"))
+        XCTAssertTrue(ExternalLaunchPolicy.allowsConfirmation(benign))
+        XCTAssertEqual(
+            NavigationPolicy.decide(NavigationRequest(url: benign, isMainFrame: true)),
+            .confirmExternal
+        )
+        let mail = try XCTUnwrap(URL(string: "mailto:person@example.com"))
+        XCTAssertEqual(
+            NavigationPolicy.decide(NavigationRequest(url: mail, isMainFrame: true)),
+            .confirmExternal
+        )
+    }
+
+    func testExternalPromptTextStripsBidiAndCapsLength() throws {
+        let spoof = try XCTUnwrap(URL(string: "https://evil.example/\u{202E}moc.elpmaxe"))
+        let shown = ExternalLaunchPolicy.promptText(for: spoof)
+        XCTAssertFalse(shown.unicodeScalars.contains { $0.value == 0x202E })
+        let long = "https://example.com/" + String(repeating: "a", count: 400)
+        let huge = try XCTUnwrap(URL(string: long))
+        let capped = ExternalLaunchPolicy.promptText(for: huge)
+        XCTAssertLessThanOrEqual(capped.count, 181)
+        XCTAssertTrue(capped.hasSuffix("…"))
+    }
+
+    func testExternalPromptGateStopsAfterThree() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var recent: [Date] = []
+        for _ in 0..<ExternalPromptGate.maxPerWindow {
+            let step = ExternalPromptGate.allow(recent: recent, now: start)
+            XCTAssertTrue(step.allow)
+            recent = step.retained
+        }
+        let blocked = ExternalPromptGate.allow(recent: recent, now: start.addingTimeInterval(1))
+        XCTAssertFalse(blocked.allow)
+        XCTAssertEqual(blocked.retained.count, ExternalPromptGate.maxPerWindow)
+        let later = ExternalPromptGate.allow(
+            recent: recent,
+            now: start.addingTimeInterval(ExternalPromptGate.windowSeconds + 1)
+        )
+        XCTAssertTrue(later.allow)
+    }
+
+    func testInspectorOpensOnlyWebURLs() throws {
+        let https = try XCTUnwrap(URL(string: "https://example.com/a"))
+        let http = try XCTUnwrap(URL(string: "http://example.com/a"))
+        XCTAssertTrue(ExternalLaunchPolicy.canOpenFromInspector(https))
+        XCTAssertTrue(ExternalLaunchPolicy.canOpenFromInspector(http))
+        for raw in ["ssh://example.com", "file:///etc/passwd", "javascript:alert(1)", "customapp://open"] {
+            let url = try XCTUnwrap(URL(string: raw), raw)
+            XCTAssertFalse(ExternalLaunchPolicy.canOpenFromInspector(url), raw)
+        }
+    }
+
     func testProductSchemesCannotStartACommand() throws {
         for raw in ["icarus://run?cmd=ls", "wyvern://run", "icarus://", "wyvern://"] {
             let url = try XCTUnwrap(URL(string: raw))
@@ -64,6 +141,37 @@ final class NavigationPolicyTests: XCTestCase {
         XCTAssertEqual(
             NavigationPolicy.decide(NavigationRequest(url: typed, isMainFrame: true)),
             .denyFile
+        )
+    }
+
+    func testFileGrantDoesNotSurviveAWebsite() throws {
+        let typed = try XCTUnwrap(URL(string: "file:///tmp/site/index.html"))
+        let sibling = try XCTUnwrap(URL(string: "file:///tmp/site/secret.txt"))
+        let web = try XCTUnwrap(URL(string: "https://evil.example/"))
+        let about = try XCTUnwrap(URL(string: "about:blank"))
+        XCTAssertEqual(
+            NavigationPolicy.decide(
+                NavigationRequest(url: sibling, isMainFrame: false, userTypedFileURL: typed, currentPageURL: web)
+            ),
+            .denyFile
+        )
+        XCTAssertEqual(
+            NavigationPolicy.decide(
+                NavigationRequest(url: typed, isMainFrame: true, userTypedFileURL: typed, currentPageURL: web)
+            ),
+            .denyFile
+        )
+        XCTAssertEqual(
+            NavigationPolicy.decide(
+                NavigationRequest(url: sibling, isMainFrame: false, userTypedFileURL: typed, currentPageURL: about)
+            ),
+            .denyFile
+        )
+        XCTAssertEqual(
+            NavigationPolicy.decide(
+                NavigationRequest(url: typed, isMainFrame: true, userTypedFileURL: typed, currentPageURL: about)
+            ),
+            .allow
         )
     }
 

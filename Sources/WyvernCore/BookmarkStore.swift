@@ -331,16 +331,13 @@ public final class BookmarkStore {
     }
 
     private func persist() {
-        let manager = FileManager.default
-        let directory = fileURL.deletingLastPathComponent()
         do {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .secondsSince1970
             let library = BookmarkLibrary(version: 2, folders: folders, bookmarks: bookmarks)
             let data = try encoder.encode(library)
-            try data.write(to: fileURL, options: [.atomic])
+            try PrivateFile.write(data, to: fileURL)
             lastErrorDescription = nil
         } catch {
             lastErrorDescription = error.localizedDescription

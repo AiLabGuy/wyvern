@@ -26,6 +26,49 @@ final class UpdateFeedTests: XCTestCase {
         try UpdateFeed.parse(data, feedURL: feedURL, basename: "WyvernBrowser", allowsDevHTTP: false)
     }
 
+    func testOfferTextLabelsUnverifiedNotesAndNamesACustomSource() {
+        let notes = String(repeating: "n", count: 450)
+        let custom = UpdateOfferText.details(
+            installedVersion: "0.1.0",
+            installedBuild: "1",
+            commit: nil,
+            host: "updates.example.invalid",
+            keyID: "ABCDEF0123456789",
+            origin: .custom,
+            notes: notes
+        )
+        XCTAssertTrue(custom.contains("Custom update source: updates.example.invalid, key ABCDEF0123456789"))
+        XCTAssertTrue(custom.contains("Notes from the update source (not verified)\n" + String(repeating: "n", count: 400)))
+        XCTAssertFalse(custom.contains(String(repeating: "n", count: 401)))
+        XCTAssertTrue(custom.contains("Commit: not listed; read from the signature after download"))
+        XCTAssertTrue(custom.contains("Source: updates.example.invalid · key ID ABCDEF0123456789"))
+
+        let builtIn = UpdateOfferText.details(
+            installedVersion: "0.1.0",
+            installedBuild: "2",
+            commit: "abc",
+            host: "updates.example.invalid",
+            keyID: "ABCDEF0123456789",
+            origin: .builtIn,
+            notes: "  Fixes.  "
+        )
+        XCTAssertFalse(builtIn.contains("Custom update source:"))
+        XCTAssertTrue(builtIn.contains("Notes from the update source (not verified)\nFixes."))
+        XCTAssertTrue(builtIn.contains("Commit: abc"))
+
+        let blank = UpdateOfferText.details(
+            installedVersion: "0.1.0",
+            installedBuild: "2",
+            commit: "abc",
+            host: "updates.example.invalid",
+            keyID: "ABCDEF0123456789",
+            origin: .builtIn,
+            notes: " \n "
+        )
+        XCTAssertFalse(blank.contains("Notes from the update source"))
+        XCTAssertFalse(blank.contains("Custom update source:"))
+    }
+
     func testLatestJSONRelativeZipResolvesBesideFeed() throws {
         let candidate = try parse(try latest(["notes": "Fixes."]))
         XCTAssertEqual(candidate.version, "0.2.0")
@@ -174,5 +217,23 @@ final class UpdateFeedTests: XCTestCase {
             to: URL(string: "https://release-assets.githubusercontent.com/github-production-release-asset/1/x.zip"),
             allowsDevHTTP: false
         ))
+        XCTAssertFalse(UpdateRedirectPolicy.shouldFollow(from: from, to: URL(string: "https://127.0.0.1/latest.json"), allowsDevHTTP: false))
+        XCTAssertFalse(UpdateRedirectPolicy.shouldFollow(from: from, to: URL(string: "https://10.1.2.3/a.zip"), allowsDevHTTP: false))
+        XCTAssertFalse(UpdateRedirectPolicy.shouldFollow(from: from, to: URL(string: "https://169.254.169.254/latest"), allowsDevHTTP: false))
+        let lan = URL(string: "https://192.168.1.5/latest.json")!
+        XCTAssertTrue(UpdateRedirectPolicy.shouldFollow(from: lan, to: URL(string: "https://192.168.1.5/a.zip"), allowsDevHTTP: false))
+        XCTAssertFalse(UpdateRedirectPolicy.shouldFollow(from: lan, to: URL(string: "https://10.0.0.8/a.zip"), allowsDevHTTP: false))
+    }
+
+    func testFeedCannotPointZipAtLoopbackOrAnotherPrivateHost() throws {
+        XCTAssertThrowsError(try parse(try latest(["zip_url": "https://127.0.0.1/WyvernBrowser-0.2.0-b7.zip"]))) { error in
+            XCTAssertEqual(error as? UpdateFeedError, .assetURLRejected)
+        }
+        XCTAssertThrowsError(try parse(try latest(["zip_url": "https://192.168.1.9/WyvernBrowser-0.2.0-b7.zip"]))) { error in
+            XCTAssertEqual(error as? UpdateFeedError, .assetURLRejected)
+        }
+        XCTAssertThrowsError(try parse(try latest(["zip_url": "https://[::1]/WyvernBrowser-0.2.0-b7.zip"]))) { error in
+            XCTAssertEqual(error as? UpdateFeedError, .assetURLRejected)
+        }
     }
 }

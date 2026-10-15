@@ -65,7 +65,12 @@ public enum UpdateFeed {
             return try parseLatest(data, feedURL: feedURL, basename: basename, allowsDevHTTP: allowsDevHTTP)
         }
         if let comments = top as? [Any] {
-            return try parseGiteaComments(comments, basename: basename, allowsDevHTTP: allowsDevHTTP)
+            return try parseGiteaComments(
+                comments,
+                feedURL: feedURL,
+                basename: basename,
+                allowsDevHTTP: allowsDevHTTP
+            )
         }
         throw UpdateFeedError.malformed
     }
@@ -112,7 +117,7 @@ public enum UpdateFeed {
         }
         // A relative zip_url resolves against the feed URL, so a fork can host both side by side.
         guard let resolved = URL(string: document.zipURL, relativeTo: feedURL)?.absoluteURL,
-              case .success = UpdateTransportPolicy.checkURL(resolved, allowsDevHTTP: allowsDevHTTP),
+              case .success = UpdateTransportPolicy.checkAssetURL(resolved, feedURL: feedURL, allowsDevHTTP: allowsDevHTTP),
               let zipName = UpdateZipName.parse(fileName: resolved.lastPathComponent, basename: basename) else {
             throw UpdateFeedError.assetURLRejected
         }
@@ -133,6 +138,7 @@ public enum UpdateFeed {
     /// commit as `commit <40 hex>`; when it does, the signed commit must match it.
     public static func parseGiteaComments(
         _ comments: [Any],
+        feedURL: URL,
         basename: String,
         allowsDevHTTP: Bool
     ) throws -> UpdateCandidate {
@@ -145,7 +151,7 @@ public enum UpdateFeed {
                 let raw = (item["browser_download_url"] as? String) ?? (item["download_url"] as? String)
                 guard let zipName = UpdateZipName.parse(fileName: name, basename: basename),
                       let raw, let url = URL(string: raw),
-                      case .success = UpdateTransportPolicy.checkURL(url, allowsDevHTTP: allowsDevHTTP) else {
+                      case .success = UpdateTransportPolicy.checkAssetURL(url, feedURL: feedURL, allowsDevHTTP: allowsDevHTTP) else {
                     continue
                 }
                 let candidate = UpdateCandidate(

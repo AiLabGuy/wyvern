@@ -10,6 +10,8 @@ import Glibc
 #endif
 
 /// SHA-256 of the exact command string the user confirmed. A changed command no longer matches.
+/// Shell and working directory stay out of the digest. Bookmark files already store this
+/// command-only value, and folding them in would make every saved confirmation ask again.
 public enum TerminalCommandHash {
     public static func hex(_ command: String) -> String {
         let digest = SHA256.hash(data: Data(command.utf8))
@@ -69,6 +71,16 @@ public enum TerminalLaunch {
             return trimmed
         }
         return nil
+    }
+
+    /// Text for the run confirmation. Shell and directory come first so a long command
+    /// cannot be the only line the person sees. The stored hash is still the command alone.
+    public static func confirmationText(command: String, shell: String, workingDirectory: String?) -> String {
+        let trimmedShell = shell.trimmingCharacters(in: .whitespacesAndNewlines)
+        let shellShown = trimmedShell.isEmpty ? "(login shell)" : trimmedShell
+        let trimmedDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let directoryShown = trimmedDirectory.isEmpty ? "~" : trimmedDirectory
+        return "Shell: \(shellShown)\nWorking directory: \(directoryShown)\nCommand: \(command)"
     }
 
     /// Address-field caption: shell name and working directory. This is not the command.

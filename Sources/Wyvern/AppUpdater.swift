@@ -186,7 +186,7 @@ final class AppUpdater {
             info: Bundle.main.infoDictionary ?? [:]
         )
         let dir = AppLocations.dataDirectory
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? PrivateFile.ensureDirectory(dir)
         logURL = dir.appendingPathComponent("update.log")
     }
 
@@ -294,16 +294,15 @@ final class AppUpdater {
     }
 
     private func offerDetails(_ candidate: UpdateCandidate, source: UpdateSource) -> String {
-        var lines = [
-            "You have version \(AppInfo.shortVersion) (build \(AppInfo.bundleVersion)).",
-            "Commit: \(candidate.commit ?? "not listed; read from the signature after download")",
-            "Source: \(source.feedURL.host ?? "") · key ID \(source.keyFingerprint)"
-        ]
-        if let notes = candidate.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
-            lines.append("")
-            lines.append(String(notes.prefix(400)))
-        }
-        return lines.joined(separator: "\n")
+        UpdateOfferText.details(
+            installedVersion: AppInfo.shortVersion,
+            installedBuild: AppInfo.bundleVersion,
+            commit: candidate.commit,
+            host: source.feedURL.host ?? "",
+            keyID: source.keyFingerprint,
+            origin: source.origin,
+            notes: candidate.notes
+        )
     }
 
     private func installPending() {
@@ -398,7 +397,13 @@ final class AppUpdater {
         let dmg = verified.dmgURL
         do {
             let backup = try await Task.detached(priority: .userInitiated) {
-                try AppUpdater.installFromDiskImage(dmg, scratch: scratch, installed: installed, bundleID: bundleID)
+                try AppUpdater.installFromDiskImage(
+                    dmg,
+                    expectedSHA256: verified.dmgSHA256,
+                    scratch: scratch,
+                    installed: installed,
+                    bundleID: bundleID
+                )
             }.value
             settings.update { $0.pendingUpdateBackupPath = backup.path }
         } catch {
@@ -428,10 +433,16 @@ final class AppUpdater {
     /// (same volume, so the swap is a rename), then swaps with codesign checks and rollback.
     nonisolated static func installFromDiskImage(
         _ dmg: URL,
+        expectedSHA256: String,
         scratch: URL,
         installed: URL,
         bundleID: String
     ) throws -> URL {
+        // The digest was checked after extract. Hash again immediately before mount so a
+        // replaced file in the same directory is not attached.
+        guard UpdatePackage.fileMatchesDigest(dmg, hex: expectedSHA256) else {
+            throw AtomicInstallError.checksumMismatch
+        }
         let mount = scratch.appendingPathComponent("mnt", isDirectory: true)
         try UpdatePackage.createPrivateDirectory(mount)
         guard run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount.path]) else {
@@ -575,12 +586,17 @@ final class AppUpdater {
     private func appendLog(_ line: String) {
         let scrubbed = line.replacingOccurrences(of: "token=", with: "token=<redacted>")
         let text = "\(ISO8601DateFormatter().string(from: Date())) \(scrubbed)\n"
+        if FileManager.default.fileExists(atPath: logURL.path) == false {
+            try? PrivateFile.write(Data(), to: logURL)
+        } else {
+            PrivateFile.tightenFile(logURL)
+        }
         if let handle = try? FileHandle(forWritingTo: logURL) {
             handle.seekToEndOfFile()
             handle.write(Data(text.utf8))
             try? handle.close()
         } else {
-            try? text.write(to: logURL, atomically: true, encoding: .utf8)
+            try? PrivateFile.write(Data(text.utf8), to: logURL)
         }
     }
 

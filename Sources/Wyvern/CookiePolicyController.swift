@@ -25,12 +25,14 @@ final class CookiePolicyController {
         let token = generation
         guard let json = policy.contentRuleListJSON else {
             ruleList = nil
+            ContentRuleCoordinator.shared.setCookieList(nil)
             NotificationCenter.default.post(name: .wyvernCookieRulesDidChange, object: nil)
             return
         }
         let identifier = "wyvern.cookie-rules.\(policy.rawValue)"
         guard let store = WKContentRuleListStore.default() else {
             ruleList = nil
+            ContentRuleCoordinator.shared.setCookieList(nil)
             NotificationCenter.default.post(name: .wyvernCookieRulesDidChange, object: nil)
             return
         }
@@ -39,19 +41,16 @@ final class CookiePolicyController {
                 MainActor.assumeIsolated {
                     guard token == self.generation else { return }
                     self.ruleList = list
+                    ContentRuleCoordinator.shared.setCookieList(list)
                     NotificationCenter.default.post(name: .wyvernCookieRulesDidChange, object: nil)
                 }
             }
         }
     }
 
-    /// Adds the current rule list to a web view configuration. Allow-all removes any previous list.
+    /// Installs the cookie list and any block lists. Does not call `removeAllContentRuleLists`.
     func install(on configuration: WKWebViewConfiguration) {
-        let controller = configuration.userContentController
-        controller.removeAllContentRuleLists()
-        if policy != .allowAll, let ruleList {
-            controller.add(ruleList)
-        }
+        ContentRuleCoordinator.shared.install(on: configuration)
     }
 
     private func applyStorePolicy(_ policy: CookiePolicy) {

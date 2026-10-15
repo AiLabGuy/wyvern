@@ -31,14 +31,15 @@ public enum UpdateZipInspector {
     /// Unpacked size cap across all members.
     public static let maxTotalUncompressed: UInt64 = 1024 * 1024 * 1024
 
-    public static func inspect(zipAt url: URL, allowed: Set<String>) throws {
+    @discardableResult
+    public static func inspect(zipAt url: URL, allowed: Set<String>) throws -> [ZipEntryInfo] {
         let data: Data
         do {
             data = try Data(contentsOf: url, options: .alwaysMapped)
         } catch {
             throw UpdatePackageError.zipMalformed
         }
-        _ = try inspect(data, allowed: allowed)
+        return try inspect(data, allowed: allowed)
     }
 
     @discardableResult
@@ -135,8 +136,9 @@ public enum UpdateZipInspector {
                 throw UpdatePackageError.zipMalformed
             }
             guard startDisk == 0 else { throw UpdatePackageError.unsupportedEntry(name) }
-            // Bit 0: encrypted. Bit 6: strong encryption. Bit 13: masked central directory.
-            guard flags & 0x0001 == 0, flags & 0x0040 == 0, flags & 0x2000 == 0 else {
+            // Bit 0: encrypted. Bit 3: data descriptor (sizes live after the payload).
+            // Bit 6: strong encryption. Bit 13: masked central directory.
+            guard flags & 0x0001 == 0, flags & 0x0008 == 0, flags & 0x0040 == 0, flags & 0x2000 == 0 else {
                 throw UpdatePackageError.unsupportedEntry(name)
             }
             guard method == 0 || method == 8 else { throw UpdatePackageError.unsupportedEntry(name) }
@@ -144,11 +146,18 @@ public enum UpdateZipInspector {
                 throw UpdatePackageError.unsupportedEntry(name)
             }
             try checkFileType(madeBy: madeBy, external: external, name: name)
+            try checkExtra(
+                data,
+                start: nameStart + Int(nameLength),
+                length: Int(extraLength),
+                headerName: nameBytes
+            )
             try checkLocalHeader(
                 data,
                 offset: Int(localOffset),
                 name: nameBytes,
-                compressedSize: Int(compressed),
+                compressedSize: compressed,
+                uncompressedSize: uncompressed,
                 limit: Int(cdOffset)
             )
             entries.append(ZipEntryInfo(
@@ -186,23 +195,75 @@ public enum UpdateZipInspector {
         _ data: Data,
         offset: Int,
         name: [UInt8],
-        compressedSize: Int,
+        compressedSize: UInt32,
+        uncompressedSize: UInt32,
         limit: Int
     ) throws {
         guard offset + localSize <= limit, u32(data, offset) == localSignature,
               let flags = u16(data, offset + 6),
+              let localCompressed = u32(data, offset + 18),
+              let localUncompressed = u32(data, offset + 22),
               let nameLength = u16(data, offset + 26),
               let extraLength = u16(data, offset + 28) else {
             throw UpdatePackageError.zipMalformed
         }
+        if flags & 0x0008 != 0 {
+            throw UpdatePackageError.unsupportedEntry("data-descriptor")
+        }
         guard flags & 0x0001 == 0 else { throw UpdatePackageError.unsupportedEntry("encrypted") }
-        let nameStart = offset + localSize
-        let dataStart = nameStart + Int(nameLength) + Int(extraLength)
-        guard Int(nameLength) == name.count, dataStart + compressedSize <= limit else {
+        guard localCompressed == compressedSize, localUncompressed == uncompressedSize else {
             throw UpdatePackageError.zipMalformed
         }
-        guard bytes(data, nameStart, Int(nameLength)) == name else {
+        let nameStart = offset + localSize
+        let dataStart = nameStart + Int(nameLength) + Int(extraLength)
+        guard Int(nameLength) == name.count, dataStart + Int(compressedSize) <= limit else {
             throw UpdatePackageError.zipMalformed
+        }
+        let localName = bytes(data, nameStart, Int(nameLength))
+        guard localName == name else {
+            throw UpdatePackageError.zipMalformed
+        }
+        try checkExtra(data, start: nameStart + Int(nameLength), length: Int(extraLength), headerName: localName)
+    }
+
+    /// ZIP64 (0x0001) is refused. An Info-ZIP Unicode Path (0x7075) may repeat the header
+    /// name and is refused when it names something else. Other extras, such as timestamps, stay.
+    private static func checkExtra(_ data: Data, start: Int, length: Int, headerName: [UInt8]) throws {
+        if length == 0 { return }
+        var cursor = start
+        let end = start + length
+        guard end <= data.count else { throw UpdatePackageError.zipMalformed }
+        while cursor + 4 <= end {
+            guard let id = u16(data, cursor), let size = u16(data, cursor + 2) else {
+                throw UpdatePackageError.zipMalformed
+            }
+            let payload = cursor + 4
+            let next = payload + Int(size)
+            guard next <= end else { throw UpdatePackageError.zipMalformed }
+            if id == 0x0001 {
+                throw UpdatePackageError.unsupportedEntry("zip64")
+            }
+            if id == 0x7075 {
+                try checkUnicodePath(data, payload: payload, length: Int(size), headerName: headerName)
+            }
+            cursor = next
+        }
+        guard cursor == end else { throw UpdatePackageError.zipMalformed }
+    }
+
+    private static func checkUnicodePath(
+        _ data: Data,
+        payload: Int,
+        length: Int,
+        headerName: [UInt8]
+    ) throws {
+        guard length >= 5 else { throw UpdatePackageError.zipMalformed }
+        guard data[data.startIndex + payload] == 1 else {
+            throw UpdatePackageError.unsupportedEntry("unicode-path")
+        }
+        let name = bytes(data, payload + 5, length - 5)
+        if name != headerName {
+            throw UpdatePackageError.pathTraversal(String(bytes: name, encoding: .utf8) ?? "")
         }
     }
 

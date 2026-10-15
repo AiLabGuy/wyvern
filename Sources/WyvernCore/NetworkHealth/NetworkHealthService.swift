@@ -201,7 +201,7 @@ public final class NetworkHealthService {
         }
     }
 
-    public func start(host: String, scheme: String) {
+    public func start(host: String, scheme: String, restoring remembered: NetworkHealthSnapshot? = nil) {
         let key = Self.normalize(host)
         mutex.lock()
         let hostChanged = key != hostKey || scheme.lowercased() != schemeKey
@@ -225,6 +225,17 @@ public final class NetworkHealthService {
             machine.reset()
             if !key.isEmpty {
                 machine.begin(at: clock.now)
+            }
+            if let remembered,
+               Self.normalize(remembered.host) == key,
+               remembered.scheme.lowercased() == scheme.lowercased(),
+               !key.isEmpty {
+                machine.restore(state: remembered.state, samples: remembered.samples, at: clock.now)
+                probeKind = remembered.probeKind
+                resolvedIP = remembered.resolvedIP
+                storedProtocol = remembered.protocolName
+                hopCount = remembered.hopCount
+                lastPublished = remembered.state
             }
             installProberLocked()
         }

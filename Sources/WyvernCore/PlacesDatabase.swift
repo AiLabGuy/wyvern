@@ -3,6 +3,11 @@
 
 import Foundation
 import SQLite3
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 public struct PlacesImport: Equatable, Sendable {
     public var nodes: [ImportedNode]
@@ -22,6 +27,21 @@ public struct PlacesImport: Equatable, Sendable {
 /// The SQL is written from the public `moz_bookmarks` / `moz_places` schema.
 /// History, favicons, cookies, and logins are not queried.
 public enum PlacesDatabase {
+    /// A copied database, including its WAL, larger than this is refused before it is read.
+    public static let maxBytes: Int64 = 512 * 1024 * 1024
+    /// Rows kept from `moz_bookmarks`. Past this the file is treated as too large.
+    static let maxRows = 200_000
+
+    /// One `moz_bookmarks` row. Tests build trees without opening sqlite.
+    struct PlacesBookmarkRow: Equatable {
+        var id: Int64
+        var type: Int
+        var parent: Int64
+        var position: Int
+        var title: String
+        var url: String
+    }
+
     private struct RawItem {
         var id: Int64
         var type: Int
@@ -45,6 +65,14 @@ public enum PlacesDatabase {
         fileManager: FileManager = .default
     ) throws -> PlacesImport {
         let sqliteURL = try resolveDatabaseURL(userPickedURL, fileManager: fileManager)
+        try validateRegularFile(sqliteURL)
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = URL(fileURLWithPath: sqliteURL.path + suffix)
+            var info = stat()
+            if sidecar.path.withCString({ lstat($0, &info) }) == 0 {
+                try validateRegularFile(sidecar)
+            }
+        }
         let temp = fileManager.temporaryDirectory
             .appendingPathComponent("wyvern-places-\(UUID().uuidString)", isDirectory: true)
         try fileManager.createDirectory(at: temp, withIntermediateDirectories: true)
@@ -107,7 +135,22 @@ public enum PlacesDatabase {
         sqlite3_close(handle)
     }
 
-    private static func readTree(from sqlite: URL) throws -> [ImportedNode] {
+    /// A regular file no larger than `maxBytes`. A symlink is refused so the copy cannot follow it.
+    static func validateRegularFile(_ url: URL, maxBytes: Int64 = PlacesDatabase.maxBytes) throws {
+        var info = stat()
+        guard url.path.withCString({ lstat($0, &info) }) == 0 else {
+            throw BookmarkImportError.unreadable
+        }
+        let mode = mode_t(info.st_mode)
+        if (mode & S_IFMT) == S_IFLNK || (mode & S_IFMT) != S_IFREG {
+            throw BookmarkImportError.unreadable
+        }
+        if info.st_size < 0 || Int64(info.st_size) > maxBytes {
+            throw BookmarkImportError.fileTooLarge
+        }
+    }
+
+    static func readTree(from sqlite: URL, maxRows: Int = PlacesDatabase.maxRows) throws -> [ImportedNode] {
         var handle: OpaquePointer?
         let uri = sqliteURI(for: sqlite)
         let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI
@@ -127,6 +170,9 @@ public enum PlacesDatabase {
 
         var items: [RawItem] = []
         while sqlite3_step(statement) == SQLITE_ROW {
+            if items.count >= maxRows {
+                throw BookmarkImportError.fileTooLarge
+            }
             let type = Int(sqlite3_column_int(statement, 1))
             if type == 3 { continue }
             let bookmarkTitle = columnText(statement, 4)
@@ -167,13 +213,25 @@ public enum PlacesDatabase {
             return []
         }
         let top = children[rootID] ?? []
-        return top.compactMap { convert($0, children: children, isRootChild: true) }
+        var stack = Set<Int64>()
+        return top.compactMap { convert($0, children: children, isRootChild: true, depth: 1, stack: &stack) }
+    }
+
+    /// Folders and bookmarks in tree order. A parent cycle is dropped. Folder nesting stops at
+    /// `BookmarkImport.maxFolderDepth`; bookmarks directly inside that last folder are kept.
+    static func nodes(from rows: [PlacesBookmarkRow]) -> [ImportedNode] {
+        let items = rows.map {
+            RawItem(id: $0.id, type: $0.type, parent: $0.parent, position: $0.position, title: $0.title, url: $0.url)
+        }
+        return assemble(items)
     }
 
     private static func convert(
         _ item: RawItem,
         children: [Int64: [RawItem]],
-        isRootChild: Bool
+        isRootChild: Bool,
+        depth: Int,
+        stack: inout Set<Int64>
     ) -> ImportedNode? {
         if item.type == 2 {
             if isRootChild, item.title.lowercased() == "tags" {
@@ -187,9 +245,21 @@ public enum PlacesDatabase {
             } else {
                 title = item.title
             }
-            let nested = (children[item.id] ?? []).compactMap {
-                convert($0, children: children, isRootChild: false)
+            if stack.contains(item.id) {
+                return nil
             }
+            if depth >= BookmarkImport.maxFolderDepth {
+                let bookmarks = (children[item.id] ?? []).compactMap { child -> ImportedNode? in
+                    guard child.type == 1 else { return nil }
+                    return .bookmark(title: child.title, url: child.url, added: nil)
+                }
+                return .folder(title: title, children: bookmarks)
+            }
+            stack.insert(item.id)
+            let nested = (children[item.id] ?? []).compactMap {
+                convert($0, children: children, isRootChild: false, depth: depth + 1, stack: &stack)
+            }
+            stack.remove(item.id)
             return .folder(title: title, children: nested)
         }
         if item.type == 1 {

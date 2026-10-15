@@ -121,6 +121,20 @@ public enum SitePermissionPolicy {
     }
 }
 
+/// Caps how many `window.open` views one page can create in a short burst.
+public enum PopupFloodPolicy {
+    public static let maxBurst = 4
+    public static let windowSeconds: TimeInterval = 2
+
+    public static func admit(recent: [Date], now: Date, maxBurst: Int = maxBurst, windowSeconds: TimeInterval = windowSeconds) -> (allow: Bool, retained: [Date]) {
+        let kept = recent.filter { now.timeIntervalSince($0) < windowSeconds }
+        if kept.count >= maxBurst {
+            return (false, kept)
+        }
+        return (true, kept + [now])
+    }
+}
+
 /// JSON file of per-site choices other than the camera and microphone prompt store.
 /// Callers use the store from one thread. The app uses it on the main thread.
 public final class SitePermissionStore {
@@ -247,10 +261,7 @@ public final class SitePermissionStore {
     }
 
     private func persist() {
-        let manager = FileManager.default
-        let directory = fileURL.deletingLastPathComponent()
         do {
-            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let records = order.compactMap { origin -> SitePermissionRecord? in
@@ -263,7 +274,7 @@ public final class SitePermissionStore {
             }
             let file = SitePermissionFile(version: 1, sites: records)
             let data = try encoder.encode(file)
-            try data.write(to: fileURL, options: [.atomic])
+            try PrivateFile.write(data, to: fileURL)
         } catch {
             return
         }
