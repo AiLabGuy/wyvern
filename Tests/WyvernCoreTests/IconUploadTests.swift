@@ -120,9 +120,11 @@ final class IconUploadTests: XCTestCase {
     }
 
     func testScaledSizeAndAbsurdDimensions() {
+        XCTAssertEqual(IconUpload.maxDimension, 4_096)
         XCTAssertEqual(IconUpload.rejectedDimension(width: 0, height: 10), .decodeFailed)
-        XCTAssertEqual(IconUpload.rejectedDimension(width: 16_385, height: 10), .absurdDimensions)
-        XCTAssertNil(IconUpload.rejectedDimension(width: 16_384, height: 16_384))
+        XCTAssertEqual(IconUpload.rejectedDimension(width: 4_097, height: 10), .absurdDimensions)
+        XCTAssertNil(IconUpload.rejectedDimension(width: 4_096, height: 4_096))
+        XCTAssertEqual(IconUpload.rejectedDimension(width: 16_384, height: 16_384), .absurdDimensions)
         XCTAssertEqual(IconUpload.scaledSize(width: 100, height: 80)?.width, 100)
         XCTAssertEqual(IconUpload.scaledSize(width: 100, height: 80)?.height, 80)
         let wide = IconUpload.scaledSize(width: 600, height: 200)
@@ -160,12 +162,38 @@ final class IconUploadTests: XCTestCase {
         XCTAssertFalse(IconUpload.isStoredFileName(name + ".txt"))
     }
 
+    func testStoredPNGRequiresSmallIHDR() throws {
+        let tiny = try tinyPNG()
+        XCTAssertEqual(IconUpload.pngPixelSize(tiny)?.width, 1)
+        XCTAssertEqual(IconUpload.pngPixelSize(tiny)?.height, 1)
+        XCTAssertTrue(IconUpload.isAcceptableStoredPNG(tiny))
+
+        let wide = pngHeader(width: 600, height: 200)
+        XCTAssertEqual(IconUpload.detectedKind(data: wide), .png)
+        XCTAssertEqual(IconUpload.pngPixelSize(wide)?.width, 600)
+        XCTAssertEqual(IconUpload.pngPixelSize(wide)?.height, 200)
+        XCTAssertFalse(IconUpload.isAcceptableStoredPNG(wide))
+
+        let huge = pngHeader(width: 16_384, height: 16_384)
+        XCTAssertFalse(IconUpload.isAcceptableStoredPNG(huge))
+        XCTAssertFalse(IconUpload.isAcceptableStoredPNG(Data("<svg></svg>".utf8)))
+        XCTAssertFalse(IconUpload.isAcceptableStoredPNG(Data()))
+        XCTAssertNil(IconUpload.pngPixelSize(Data("icns".utf8)))
+    }
+
     func testRefusesSymbolicLink() throws {
         let target = directory.appendingPathComponent("real.png")
         try tinyPNG().write(to: target)
         let link = directory.appendingPathComponent("link.png")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
         XCTAssertEqual(failure(IconUpload.readBounded(at: link)), .unreadable)
+    }
+
+    func testRefusesFIFOWithoutBlocking() {
+        let fifo = directory.appendingPathComponent("pipe.png")
+        XCTAssertEqual(fifo.path.withCString { mkfifo($0, 0o600) }, 0)
+        // Without O_NONBLOCK, open() would wait here for a writer that never comes.
+        XCTAssertEqual(failure(IconUpload.readBounded(at: fifo)), .unreadable)
     }
 
     func testIndexRoundTripPermissionsAndCorruptIndex() throws {
@@ -236,6 +264,40 @@ final class IconUploadTests: XCTestCase {
         XCTAssertEqual(failure(library.installPreparedPNG(svg, forBookmark: UUID())), .unsupportedType)
         XCTAssertEqual(failure(library.installPreparedPNG(Data(), forHost: "example.com")), .empty)
         XCTAssertEqual(failure(library.installPreparedPNG(try! tinyPNG(), forHost: " ")), .invalidHost)
+        XCTAssertEqual(
+            failure(library.installPreparedPNG(pngHeader(width: 2000, height: 2000), forBookmark: UUID())),
+            .absurdDimensions
+        )
+    }
+
+    func testStoredSymlinkAndHugePNGAreIgnored() throws {
+        let library = IconLibrary(directory: directory)
+        let png = try tinyPNG()
+        try successVoid(library.installPreparedPNGForAppIcon(png))
+        let stored = try XCTUnwrap(library.customAppIconURL())
+        let outside = directory.appendingPathComponent("outside.png")
+        try png.write(to: outside)
+        try FileManager.default.removeItem(at: stored)
+        try FileManager.default.createSymbolicLink(at: stored, withDestinationURL: outside)
+        XCTAssertNil(library.customAppIconURL())
+
+        try FileManager.default.removeItem(at: stored)
+        try pngHeader(width: 16_384, height: 16_384).write(to: stored)
+        XCTAssertNil(library.customAppIconURL())
+    }
+
+    func testResetDoesNotDeletePlantedDirectory() throws {
+        let library = IconLibrary(directory: directory)
+        let png = try tinyPNG()
+        try successVoid(library.installPreparedPNGForAppIcon(png))
+        let stored = try XCTUnwrap(library.customAppIconURL())
+        try FileManager.default.removeItem(at: stored)
+        try FileManager.default.createDirectory(at: stored, withIntermediateDirectories: true)
+        let nested = stored.appendingPathComponent("keep.txt")
+        try Data("keep".utf8).write(to: nested)
+        try successVoid(library.resetAppIcon())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nested.path))
+        XCTAssertEqual(try String(contentsOf: nested, encoding: .utf8), "keep")
     }
 
     #if canImport(ImageIO) && canImport(CoreGraphics)
@@ -258,7 +320,35 @@ final class IconUploadTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(size.width - expected.width), 2)
         XCTAssertLessThanOrEqual(abs(size.height - expected.height), 2)
     }
+
+    func testSanitizedPNGKeepsEXIFRotationForSmallImages() throws {
+        // 300x200 stored, orientation 6 (rotate 90° clockwise to display): shows as 200x300.
+        let jpeg = try makeImageData(width: 300, height: 200, type: "public.jpeg", orientation: 6)
+        let encoded = try successData(IconUpload.sanitizedPNG(data: jpeg, fileExtension: "jpg"))
+        let size = try imageSize(encoded)
+        XCTAssertEqual(size.width, 200)
+        XCTAssertEqual(size.height, 300)
+    }
     #endif
+
+    /// Signature plus a well-formed IHDR. Enough for `pngPixelSize`; not a complete image.
+    private func pngHeader(width: Int, height: Int) -> Data {
+        var data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        data.append(contentsOf: [0x00, 0x00, 0x00, 0x0D])
+        data.append(contentsOf: Array("IHDR".utf8))
+        func appendBE(_ value: Int) {
+            let v = UInt32(value)
+            data.append(UInt8((v >> 24) & 0xFF))
+            data.append(UInt8((v >> 16) & 0xFF))
+            data.append(UInt8((v >> 8) & 0xFF))
+            data.append(UInt8(v & 0xFF))
+        }
+        appendBE(width)
+        appendBE(height)
+        data.append(contentsOf: [0x08, 0x06, 0x00, 0x00, 0x00])
+        data.append(contentsOf: [0, 0, 0, 0])
+        return data
+    }
 
     private func tinyPNG() throws -> Data {
         let hex = "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c63f8cfc0f01f00050001ff89993d1d0000000049454e44ae426082"
@@ -325,6 +415,10 @@ final class IconUploadTests: XCTestCase {
 
     #if canImport(ImageIO) && canImport(CoreGraphics)
     private func makePNG(width: Int, height: Int) throws -> Data {
+        try makeImageData(width: width, height: height, type: "public.png", orientation: nil)
+    }
+
+    private func makeImageData(width: Int, height: Int, type: String, orientation: Int?) throws -> Data {
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         guard let context = CGContext(
             data: nil,
@@ -343,10 +437,15 @@ final class IconUploadTests: XCTestCase {
             throw CocoaError(.coderReadCorrupt)
         }
         let buffer = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(buffer, "public.png" as CFString, 1, nil) else {
+        guard let destination = CGImageDestinationCreateWithData(buffer, type as CFString, 1, nil) else {
             throw CocoaError(.coderReadCorrupt)
         }
-        CGImageDestinationAddImage(destination, image, nil)
+        if let orientation {
+            let properties: [CFString: Any] = [kCGImagePropertyOrientation: orientation]
+            CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        } else {
+            CGImageDestinationAddImage(destination, image, nil)
+        }
         guard CGImageDestinationFinalize(destination) else {
             throw CocoaError(.coderReadCorrupt)
         }

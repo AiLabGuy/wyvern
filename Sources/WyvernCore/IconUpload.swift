@@ -63,11 +63,13 @@ public struct IconFilePayload: Equatable, Sendable {
 ///   bytes are SVG, XML, PDF, or anything else is rejected (`unsupportedType`).
 ///
 /// ImageIO then decodes the file, rejects zero images, a failed decode, or a
-/// side of 0 or greater than 16384, scales the longest side to at most 512,
+/// side of 0 or greater than 4096, scales the longest side to at most 512,
 /// and re-encodes PNG. Stored names are chosen by the library, never by the user.
+/// 4096 is enough for a 4K source and caps an uncompressed bitmap at 64 MiB;
+/// ImageIO's thumbnail path may still expand the declared PNG before scaling.
 public enum IconUpload {
     public static let maxBytes = 5 * 1024 * 1024
-    public static let maxDimension = 16_384
+    public static let maxDimension = 4_096
     public static let maxEdge = 512
 
     private static let pngSignature: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
@@ -127,7 +129,7 @@ public enum IconUpload {
         return nil
     }
 
-    /// `width`/`height` from a decoder. Zero is a failed decode. Above 16384 is refused
+    /// `width`/`height` from a decoder. Zero is a failed decode. Above 4096 is refused
     /// before the bitmap is expanded.
     public static func rejectedDimension(width: Int, height: Int) -> IconUploadError? {
         if width <= 0 || height <= 0 {
@@ -210,13 +212,14 @@ public enum IconUpload {
 
     /// `fstat` the file, refuse anything over 5 MiB or not a regular file, then read.
     /// Symbolic links are refused (`O_NOFOLLOW`) so the size check cannot see a short
-    /// link and then follow it to a larger file.
+    /// link and then follow it to a larger file. `O_NONBLOCK` keeps a FIFO from blocking
+    /// `open` until a writer appears; it is then refused as not a regular file.
     public static func readBounded(at url: URL) -> Result<IconFilePayload, IconUploadError> {
         let opened = url.path.withCString { path -> Int32 in
             #if canImport(Darwin)
-            return Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            return Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
             #else
-            return Glibc.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            return Glibc.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
             #endif
         }
         if opened < 0 {
@@ -307,6 +310,41 @@ public enum IconUpload {
         }
     }
 
+    /// IHDR width and height. Nil when the bytes are not a PNG with a leading IHDR.
+    public static func pngPixelSize(_ data: Data) -> (width: Int, height: Int)? {
+        guard data.count >= 24, hasPrefix(data, pngSignature) else { return nil }
+        func be32(_ offset: Int) -> UInt32? {
+            guard data.count >= offset + 4 else { return nil }
+            let start = data.index(data.startIndex, offsetBy: offset)
+            let b0 = UInt32(data[start])
+            let b1 = UInt32(data[data.index(start, offsetBy: 1)])
+            let b2 = UInt32(data[data.index(start, offsetBy: 2)])
+            let b3 = UInt32(data[data.index(start, offsetBy: 3)])
+            return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        }
+        guard let length = be32(8), length == 13 else { return nil }
+        let typeStart = data.index(data.startIndex, offsetBy: 12)
+        let typeEnd = data.index(typeStart, offsetBy: 4)
+        guard [UInt8](data[typeStart..<typeEnd]) == [0x49, 0x48, 0x44, 0x52] else { return nil }
+        guard let width = be32(16), let height = be32(20) else { return nil }
+        guard width <= UInt32(Int.max), height <= UInt32(Int.max) else { return nil }
+        return (Int(width), Int(height))
+    }
+
+    /// True when `data` is a PNG whose IHDR fits in the stored-icon cap (`maxEdge`).
+    /// Used for files already on disk and for `installPreparedPNG`, which must not
+    /// write a decompression-bomb PNG that skipped `sanitizedPNG`.
+    public static func isAcceptableStoredPNG(_ data: Data) -> Bool {
+        guard !data.isEmpty, data.count <= maxBytes, detectedKind(data: data) == .png else {
+            return false
+        }
+        guard let size = pngPixelSize(data) else { return false }
+        if rejectedDimension(width: size.width, height: size.height) != nil {
+            return false
+        }
+        return size.width <= maxEdge && size.height <= maxEdge
+    }
+
     /// `XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX.png`, the only name the library will open.
     public static func isStoredFileName(_ name: String) -> Bool {
         guard name.count == 40, name.hasSuffix(".png") else { return false }
@@ -384,7 +422,11 @@ public enum IconUpload {
 
     #if canImport(ImageIO) && canImport(CoreGraphics)
     private static func reencode(_ data: Data) -> Result<Data, IconUploadError> {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
             return .failure(.decodeFailed)
         }
         let count = CGImageSourceGetCount(source)
@@ -393,10 +435,12 @@ public enum IconUpload {
         }
         var bestIndex = -1
         var bestEdge = -1
-        var bestWidth = 0
-        var bestHeight = 0
         for index in 0..<count {
-            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] else {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(
+                source,
+                index,
+                sourceOptions as CFDictionary
+            ) as? [CFString: Any] else {
                 return .failure(.decodeFailed)
             }
             guard let width = intProperty(properties[kCGImagePropertyPixelWidth]),
@@ -409,8 +453,6 @@ public enum IconUpload {
             let edge = max(width, height)
             if edge > bestEdge {
                 bestEdge = edge
-                bestWidth = width
-                bestHeight = height
                 bestIndex = index
             }
         }
@@ -418,18 +460,20 @@ public enum IconUpload {
             return .failure(.decodeFailed)
         }
         let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxEdge
         ]
         if let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, bestIndex, options as CFDictionary) {
-            let grew = thumbnail.width > bestWidth || thumbnail.height > bestHeight
+            // Compare the longest side: an EXIF rotation swaps width and height without growing.
+            let grew = max(thumbnail.width, thumbnail.height) > bestEdge
             if grew == false {
                 return encodePNG(thumbnail)
             }
         }
         if bestEdge <= maxEdge,
-           let image = CGImageSourceCreateImageAtIndex(source, bestIndex, nil) {
+           let image = CGImageSourceCreateImageAtIndex(source, bestIndex, sourceOptions as CFDictionary) {
             return encodePNG(image)
         }
         return .failure(.decodeFailed)

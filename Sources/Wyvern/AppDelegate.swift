@@ -455,8 +455,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     static func rememberedDevToolsWindowFrame() -> NSRect? {
         guard let raw = AppLocations.userDefaults.string(forKey: devToolsWindowFrameKey) else { return nil }
         let parts = raw.split(separator: ",").compactMap { Double($0) }
-        guard parts.count == 4, parts[2] >= 320, parts[3] >= 200 else { return nil }
-        return NSRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+        guard parts.count == 4 else { return nil }
+        // Older builds stored frames below today's 640x420 minimum. clamped() grows them like per-source frames.
+        guard let frame = DevToolsWindowFrames.clamped(
+            DevToolsWindowFrames.Frame(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+        ) else { return nil }
+        return NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
     }
 
     static func rememberDevToolsWindowFrame(_ frame: NSRect) {

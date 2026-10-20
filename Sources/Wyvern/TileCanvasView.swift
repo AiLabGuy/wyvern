@@ -1574,6 +1574,8 @@ final class TilePanePill: NSView {
             onDragEnded?(screenPoint(of: event))
             return
         }
+        // Like a normal button: releasing off the pressed control cancels the click.
+        guard let control, control.frame.contains(convert(event.locationInWindow, from: nil)) else { return }
         performPress(on: control)
     }
 

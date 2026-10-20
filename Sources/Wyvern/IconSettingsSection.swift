@@ -64,6 +64,7 @@ class IconSettingsSection: NSObject {
 
         hostFrame.field.placeholderString = "example.com"
         hostFrame.field.setAccessibilityIdentifier("wyvern.settings.icons.host")
+        hostFrame.field.setAccessibilityLabel("Site host")
         hostFrame.translatesAutoresizingMaskIntoConstraints = false
         hostFrame.widthAnchor.constraint(equalToConstant: 180).isActive = true
         let hostChoose = DepthButton(title: "Choose…", kind: .secondary)
@@ -278,7 +279,15 @@ class IconStyleChoice: NSButton {
         let side = min(bounds.width - 8, 58)
         let thumb = NSRect(x: bounds.midX - side / 2, y: bounds.height - side - 4, width: side, height: side)
         if let icon {
-            icon.draw(in: thumb, from: .zero, operation: .sourceOver, fraction: 1)
+            // Uploads keep their aspect ratio. Fit inside the square instead of stretching.
+            var fitted = thumb
+            if icon.size.width > 0, icon.size.height > 0 {
+                let scale = min(thumb.width / icon.size.width, thumb.height / icon.size.height)
+                let width = icon.size.width * scale
+                let height = icon.size.height * scale
+                fitted = NSRect(x: thumb.midX - width / 2, y: thumb.midY - height / 2, width: width, height: height)
+            }
+            icon.draw(in: fitted, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         } else {
             Theme.card.setFill()
             NSBezierPath(roundedRect: thumb, xRadius: 8, yRadius: 8).fill()

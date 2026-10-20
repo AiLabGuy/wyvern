@@ -27,6 +27,10 @@ public struct DevToolsWindowFrames: Equatable, Sendable {
     public static let defaultHeight: Double = 640
     public static let minimumWidth: Double = 640
     public static let minimumHeight: Double = 420
+    /// Caps a restored frame so a huge stored size cannot create a giant window.
+    /// 8192 covers a 5K display and two 4K displays side by side.
+    public static let maximumWidth: Double = 8192
+    public static let maximumHeight: Double = 8192
     /// Oldest entries are dropped past this many sources so the defaults value stays small.
     public static let capacity = 32
 
@@ -44,15 +48,16 @@ public struct DevToolsWindowFrames: Equatable, Sendable {
 
     public var count: Int { entries.count }
 
-    /// Grows a frame to the minimum size. Origin is kept. Non-finite frames are rejected.
+    /// Grows a frame to the minimum size and caps it at the maximum. Origin is kept.
+    /// Non-finite frames are rejected.
     public static func clamped(_ frame: Frame) -> Frame? {
         let values = [frame.x, frame.y, frame.width, frame.height]
         guard values.allSatisfy({ $0.isFinite }) else { return nil }
         return Frame(
             x: frame.x,
             y: frame.y,
-            width: max(frame.width, minimumWidth),
-            height: max(frame.height, minimumHeight)
+            width: min(max(frame.width, minimumWidth), maximumWidth),
+            height: min(max(frame.height, minimumHeight), maximumHeight)
         )
     }
 
