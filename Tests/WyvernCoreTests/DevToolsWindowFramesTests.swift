@@ -12,6 +12,8 @@ final class DevToolsWindowFramesTests: XCTestCase {
         XCTAssertEqual(DevToolsWindowFrames.defaultHeight, 640)
         XCTAssertEqual(DevToolsWindowFrames.minimumWidth, 640)
         XCTAssertEqual(DevToolsWindowFrames.minimumHeight, 420)
+        XCTAssertEqual(DevToolsWindowFrames.maximumWidth, 8192)
+        XCTAssertEqual(DevToolsWindowFrames.maximumHeight, 8192)
     }
 
     func testFramesAreRememberedPerSource() {
@@ -46,6 +48,23 @@ final class DevToolsWindowFramesTests: XCTestCase {
         let a = UUID()
         frames.remember(Frame(x: .nan, y: 0, width: 900, height: 640), for: a)
         XCTAssertNil(frames.frame(for: a))
+        frames.remember(Frame(x: 0, y: 0, width: .infinity, height: 640), for: a)
+        XCTAssertNil(frames.frame(for: a))
+    }
+
+    func testHugeFramesAreClampedToTheMaximum() {
+        var frames = DevToolsWindowFrames()
+        let a = UUID()
+        frames.remember(Frame(x: 1, y: 2, width: 1_000_000, height: 1_000_000), for: a)
+        XCTAssertEqual(
+            frames.frame(for: a),
+            Frame(x: 1, y: 2, width: DevToolsWindowFrames.maximumWidth, height: DevToolsWindowFrames.maximumHeight)
+        )
+        let decoded = DevToolsWindowFrames.decode(
+            Data(#"[{"source":"\#(a.uuidString)","frame":{"x":0,"y":0,"width":1e20,"height":1e20}}]"#.utf8)
+        )
+        XCTAssertEqual(decoded.frame(for: a)?.width, DevToolsWindowFrames.maximumWidth)
+        XCTAssertEqual(decoded.frame(for: a)?.height, DevToolsWindowFrames.maximumHeight)
     }
 
     func testCapacityDropsTheOldest() {

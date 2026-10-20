@@ -291,6 +291,14 @@ public final class IconLibrary {
         guard !png.isEmpty else { return .failure(.empty) }
         guard png.count <= IconUpload.maxBytes else { return .failure(.tooLarge) }
         guard IconUpload.detectedKind(data: png) == .png else { return .failure(.unsupportedType) }
+        guard IconUpload.isAcceptableStoredPNG(png) else {
+            if let size = IconUpload.pngPixelSize(png),
+               size.width > IconUpload.maxEdge || size.height > IconUpload.maxEdge
+                || IconUpload.rejectedDimension(width: size.width, height: size.height) != nil {
+                return .failure(.absurdDimensions)
+            }
+            return .failure(.decodeFailed)
+        }
         let snapshot = catalog
         switch storeNewFile(png) {
         case .failure(let error):
@@ -356,12 +364,23 @@ public final class IconLibrary {
 
     private func existingFile(named name: String) -> URL? {
         guard let url = fileURL(named: name) else { return nil }
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return url
+        switch IconUpload.readBounded(at: url) {
+        case .failure:
+            return nil
+        case .success(let payload):
+            guard IconUpload.isAcceptableStoredPNG(payload.data) else { return nil }
+            return url
+        }
     }
 
     private func removeFile(named name: String) {
         guard let url = fileURL(named: name) else { return }
+        guard let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType else {
+            return
+        }
+        // Unlink a regular file or a planted symlink. Do not recursively delete a directory
+        // that reused a stored name.
+        guard type == .typeRegular || type == .typeSymbolicLink else { return }
         try? FileManager.default.removeItem(at: url)
     }
 
