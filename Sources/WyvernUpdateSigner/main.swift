@@ -18,7 +18,7 @@ import Glibc
 /// This tool never generates a key: the public key embedded in the app must not rotate silently.
 @main
 enum WyvernUpdateSignerMain {
-    private static let serviceName = "app1-update-signing"
+    private static let serviceName = "wyvern-update-signing"
     private static let accountName = "ci"
     private static let seedLength = 32
     /// Must equal `UPDATE_PUBLIC_KEY` in config/product.env (and so Resources/Info.plist).

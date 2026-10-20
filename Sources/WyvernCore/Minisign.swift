@@ -113,7 +113,7 @@ public enum Minisign {
         globalMessage.append(Data(trusted.utf8))
         let global = try privateKey.signature(for: globalMessage)
         var lines: [String] = []
-        lines.append("untrusted comment: signature from app1-update-signing")
+        lines.append("untrusted comment: signature from wyvern-update-signing")
         lines.append(blob.base64EncodedString())
         lines.append("trusted comment: \(trusted)")
         lines.append(global.base64EncodedString())

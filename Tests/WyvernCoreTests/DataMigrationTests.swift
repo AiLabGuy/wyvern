@@ -123,7 +123,7 @@ final class DataMigrationTests: XCTestCase {
     }
 
     func testDefaultsMigrateOnceWithMarker() throws {
-        let legacyName = "org.placeholder.app1.migrate-test.\(UUID().uuidString)"
+        let legacyName = "com.example.wyvern.legacy.migrate-test.\(UUID().uuidString)"
         let currentName = "com.example.wyvern.migrate-test.\(UUID().uuidString)"
         let legacy = try XCTUnwrap(UserDefaults(suiteName: legacyName))
         let current = try XCTUnwrap(UserDefaults(suiteName: currentName))
