@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         static let bookmark = 6
         static let restoreSession = 7
         static let showBlockedCount = 8
+        static let kvmMode = 9
         static let bookmarkSeparator = 900
     }
 
@@ -105,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         BrowserTab.defaultFontSize = settings.settings.defaultFontSize
         BrowserTab.defaultZoomPercent = settings.settings.defaultZoomPercent
         BrowserTab.developerToolsEnabled = settings.settings.developerToolsEnabled
+        BrowserTab.kvmSites = settings.settings.kvmSites
         BrowserTab.logSoftwareRenderingSupport()
         ProcessInfo.processInfo.disableSuddenTermination()
         CookiePolicyController.shared.apply(settings.settings.cookiePolicy)
@@ -184,6 +186,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
         if menu === viewMenu, let entry = menu.items.first(where: { $0.tag == MenuTag.showBlockedCount }) {
             entry.state = BlockListController.shared.showBlockedCount ? .on : .off
+        }
+        if menu === viewMenu, let entry = menu.items.first(where: { $0.tag == MenuTag.kvmMode }) {
+            entry.state = keyBrowser?.kvmModeMenuState.on == true ? .on : .off
         }
         if menu === bookmarksMenu {
             rebuildBookmarkItems()
@@ -273,6 +278,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             return session.canRestorePrevious
         case #selector(showWebInspector(_:)):
             return focusedBrowserWindow()?.canToggleWebInspector == true
+        case #selector(toggleKVMModeForThisSite(_:)):
+            let state: (enabled: Bool, on: Bool) = keyBrowser?.kvmModeMenuState ?? (enabled: false, on: false)
+            menuItem.state = state.on ? .on : .off
+            return state.enabled
         case #selector(startElementSelection(_:)), #selector(showJavaScriptConsole(_:)):
             return focusedBrowserWindow()?.focusedWebInspectorTarget() != nil
         default:
@@ -349,6 +358,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc func toggleBlockedCount(_ sender: Any?) {
         let shown = BlockListController.shared.showBlockedCount == false
         BlockListController.shared.setShowBlockedCount(shown)
+    }
+
+    @objc func toggleKVMModeForThisSite(_ sender: Any?) {
+        keyBrowser?.toggleKVMModeForFocusedPage()
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
@@ -723,6 +736,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         blockedCount.tag = MenuTag.showBlockedCount
         blockedCount.state = BlockListController.shared.showBlockedCount ? .on : .off
         viewMenu.addItem(blockedCount)
+        let kvmMode = item("KVM Mode for This Site", action: #selector(toggleKVMModeForThisSite(_:)), target: self)
+        kvmMode.tag = MenuTag.kvmMode
+        viewMenu.addItem(kvmMode)
         viewMenu.addItem(item(
             "Enter Full Screen",
             action: #selector(NSWindow.toggleFullScreen(_:)),
@@ -856,11 +872,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     /// The only Ctrl-Tab and Cmd-W monitor. It lives here, in `AppDelegate.installTabKeyMonitor`.
-    /// Browser windows do not install a second one. Command-W and Shift-Command-W are handed to
-    /// the main menu, so they run the File menu items (validation, nil-target responder chain)
-    /// before a web view can claim the key equivalent.
+    /// Browser windows do not install a second one. KVM capture is the first check inside
+    /// `handleReservedKeys`. flagsChanged is not monitored, so modifier changes still reach the
+    /// first responder. Command-W and Shift-Command-W are handed to the main menu when KVM
+    /// capture is off, so they run the File menu items before a web view can claim them.
     private func installTabKeyMonitor() {
-        tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        tabKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             MainActor.assumeIsolated {
                 guard let self else { return event }
                 return self.handleReservedKeys(event)
@@ -869,6 +886,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
 
     private func handleReservedKeys(_ event: NSEvent) -> NSEvent? {
+        if let browser = event.window?.windowController as? BrowserWindowController,
+           browser.routeKVMKeyEvent(event) {
+            return nil
+        }
+        guard event.type == .keyDown else { return event }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         // 13 is W (kVK_ANSI_W). Command-W closes the tab even when a web view or field editor is focused.
         if event.keyCode == 13, flags.contains(.command), !flags.contains(.option), !flags.contains(.control) {
@@ -1295,6 +1317,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         BrowserTab.defaultFontSize = current.defaultFontSize
         BrowserTab.defaultZoomPercent = current.defaultZoomPercent
         BrowserTab.developerToolsEnabled = current.developerToolsEnabled
+        BrowserTab.kvmSites = current.kvmSites
+        for browser in windows {
+            browser.refreshKVMChrome()
+        }
         updateDevelopMenuVisibility()
         if current.cookiePolicy != appliedCookiePolicy {
             appliedCookiePolicy = current.cookiePolicy

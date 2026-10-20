@@ -326,6 +326,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     /// Hidden inspector kept for 30 seconds after the DevTools tab closes, keyed by source id.
     private var suspendedDevTools: [UUID: DevToolsTab] = [:]
     private var isSyncingBars = false
+    /// True while a KVM key is being handed to the web view, so the monitor does not handle it twice.
+    private var kvmDeliveringKey = false
     private var standbyHosts: [UUID: WebInspectorHost] = [:]
     private var standbyViews: [UUID: DevToolsStandbyView] = [:]
     private var menuTrackingObserver: NSObjectProtocol?
@@ -2437,6 +2439,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         let allowed = Self.allowsBookmark(tab.displayedURL)
         let bookmarked = allowed && tab.displayedURL.flatMap { bookmarks.bookmark(matchingURL: $0.absoluteString) } != nil
         addressField.present(url: tab.displayedURL, bookmarked: bookmarked, canBookmark: allowed)
+        syncKVMAddressBadge()
         syncBlockBadgeForFocusedPane()
         window?.title = "\(tab.title) — \(AppInfo.displayName)"
         feedHealth(host: tab.displayedURL?.host, url: tab.displayedURL)
@@ -2466,6 +2469,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         terminal.fontSize = CGFloat(settings.settings.terminalFontSize)
         terminal.applyColors()
         addressField.presentCommand(terminal.command, caption: terminal.fieldCaption)
+        syncKVMAddressBadge()
         syncBlockBadgeForFocusedPane()
         window?.title = "\(terminal.name) — \(AppInfo.displayName)"
         feedHealth(host: nil, url: nil)
@@ -4540,6 +4544,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         let allowed = Self.allowsBookmark(url)
         let bookmarked = allowed && url.flatMap { bookmarks.bookmark(matchingURL: $0.absoluteString) } != nil
         addressField.presentDevTools(url: url, bookmarked: bookmarked, canBookmark: allowed)
+        syncKVMAddressBadge()
         window?.title = "\(tools.displayTitle) — \(AppInfo.displayName)"
         feedHealth(host: url?.host, url: url, rememberAs: source?.id)
         refreshAppearanceProbe()
@@ -5061,6 +5066,99 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     @objc func splitDevToolsWithPage(_ sender: Any?) {
         guard let id = menuDevToolsID(sender) ?? activeDevToolsTab()?.id else { return }
         moveDevTools(id: id, to: .right)
+    }
+
+    /// View menu and the address-bar badge. Disabled unless the focused page has an http(s) origin.
+    var kvmModeMenuState: (enabled: Bool, on: Bool) {
+        guard let tab = activeTab, tab.surface == .web, let url = tab.displayedURL else {
+            return (false, false)
+        }
+        return (KVMSiteList.normalizedOrigin(from: url) != nil, settings.settings.kvmSites.contains(url))
+    }
+
+    func toggleKVMModeForFocusedPage() {
+        let state = kvmModeMenuState
+        guard state.enabled, let url = activeTab?.displayedURL else { return }
+        settings.update { current in
+            if state.on {
+                current.kvmSites = current.kvmSites.removing(url)
+            } else {
+                current.kvmSites = current.kvmSites.adding(url)
+            }
+        }
+        activeTab?.kvmCaptureSuspended = false
+        BrowserTab.kvmSites = settings.settings.kvmSites
+        refreshKVMChrome()
+    }
+
+    func refreshKVMChrome() {
+        for item in session {
+            if case .web(let tab) = item {
+                tab.applyKVMMediaPolicy(newDocument: false)
+            }
+        }
+        syncKVMAddressBadge()
+    }
+
+    /// First step of the only key monitor. True means the event was consumed.
+    /// flagsChanged is not handled here, so modifier changes still reach the first responder.
+    func routeKVMKeyEvent(_ event: NSEvent) -> Bool {
+        if kvmDeliveringKey { return true }
+        guard event.type == .keyDown || event.type == .keyUp else { return false }
+        guard let window = event.window else { return false }
+        guard let tab = activeTab, tab.surface == .web, let url = tab.displayedURL else { return false }
+        guard settings.settings.kvmSites.contains(url) else { return false }
+        guard let view = window.firstResponder as? NSView, view.isDescendant(of: tab.webView) else {
+            return false
+        }
+        let decision = KVMKeyRouting.route(
+            keyCode: event.keyCode,
+            modifiers: KVMKeyModifiers(event.modifierFlags),
+            kvmActive: true,
+            captureSuspended: tab.kvmCaptureSuspended
+        )
+        switch decision {
+        case .passToApp:
+            return false
+        case .sendToPage:
+            deliverKVMKey(event, to: tab.webView)
+            return true
+        case .toggleCapture:
+            guard event.type == .keyDown, event.isARepeat == false else { return true }
+            tab.kvmCaptureSuspended.toggle()
+            syncKVMAddressBadge()
+            let text = tab.kvmCaptureSuspended
+                ? "KVM paused — Control-Option-Command-K to resume"
+                : "KVM capture on — Control-Option-Command-K to pause"
+            KVMCaptureToast.show(text, in: window)
+            NSAccessibility.post(element: addressField, notification: .announcementRequested, userInfo: [
+                .announcement: text as NSString
+            ])
+            return true
+        }
+    }
+
+    private func deliverKVMKey(_ event: NSEvent, to webView: WKWebView) {
+        kvmDeliveringKey = true
+        defer { kvmDeliveringKey = false }
+        switch event.type {
+        case .keyDown:
+            webView.keyDown(with: event)
+        case .keyUp:
+            webView.keyUp(with: event)
+        default:
+            break
+        }
+    }
+
+    private func syncKVMAddressBadge() {
+        guard let tab = activeTab, tab.surface == .web,
+              let url = tab.displayedURL,
+              settings.settings.kvmSites.contains(url) else {
+            addressField.setKVM(.off)
+            return
+        }
+        addressField.setKVM(tab.kvmCaptureSuspended ? .paused : .active)
     }
 
     private func emitPopoverID() {

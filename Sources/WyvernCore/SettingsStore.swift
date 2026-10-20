@@ -86,6 +86,8 @@ public struct AppSettings: Equatable, Sendable {
     /// When true, the Develop menu is shown and ordinary web pages can be inspected.
     /// A missing value stays false. New tab, bookmarks, settings, and terminal stay closed.
     public var developerToolsEnabled: Bool
+    /// http(s) origins that send Command, Option, and Control keys to the page. Missing stays empty.
+    public var kvmSites: KVMSiteList
 
     public init(
         schemaVersion: Int = AppSettings.currentSchemaVersion,
@@ -112,7 +114,8 @@ public struct AppSettings: Equatable, Sendable {
         defaultFontSize: Int = 16,
         defaultZoomPercent: Int = 100,
         tourSeen: Bool = false,
-        developerToolsEnabled: Bool = false
+        developerToolsEnabled: Bool = false,
+        kvmSites: KVMSiteList = KVMSiteList()
     ) {
         self.schemaVersion = schemaVersion
         self.appearance = appearance
@@ -139,6 +142,7 @@ public struct AppSettings: Equatable, Sendable {
         self.defaultZoomPercent = defaultZoomPercent
         self.tourSeen = tourSeen
         self.developerToolsEnabled = developerToolsEnabled
+        self.kvmSites = kvmSites
         normalize()
     }
 
@@ -172,6 +176,7 @@ public struct AppSettings: Equatable, Sendable {
         if schemaVersion < AppSettings.currentSchemaVersion {
             schemaVersion = AppSettings.currentSchemaVersion
         }
+        kvmSites = KVMSiteList(origins: kvmSites.origins)
     }
 
     /// Selected engine, or DuckDuckGo when the id is unknown or the custom template is invalid.
@@ -241,6 +246,7 @@ extension AppSettings: Codable {
         case defaultZoomPercent
         case tourSeen
         case developerToolsEnabled
+        case kvmSites
     }
 
     // Keyed decoding ignores unknown keys, so a saved document that still contains a launcher key still loads.
@@ -276,6 +282,7 @@ extension AppSettings: Codable {
         defaultZoomPercent = try container.decodeIfPresent(Int.self, forKey: .defaultZoomPercent) ?? 100
         tourSeen = try container.decodeIfPresent(Bool.self, forKey: .tourSeen) ?? false
         developerToolsEnabled = try container.decodeIfPresent(Bool.self, forKey: .developerToolsEnabled) ?? false
+        kvmSites = try container.decodeIfPresent(KVMSiteList.self, forKey: .kvmSites) ?? KVMSiteList()
         normalize()
     }
 
@@ -306,6 +313,7 @@ extension AppSettings: Codable {
         try container.encode(defaultZoomPercent, forKey: .defaultZoomPercent)
         try container.encode(tourSeen, forKey: .tourSeen)
         try container.encode(developerToolsEnabled, forKey: .developerToolsEnabled)
+        try container.encode(kvmSites, forKey: .kvmSites)
     }
 }
 

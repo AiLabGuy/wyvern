@@ -325,6 +325,10 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     private let icon = GlyphView()
     private let braces = DevToolsBracesView()
     private let star = ToolButton()
+    private let kvmBadge = KVMAddressBadgeView()
+    private var textToStar: NSLayoutConstraint?
+    private var textToBadge: NSLayoutConstraint?
+    private var kvmBadgeWidth: NSLayoutConstraint?
     private var pageURL: URL?
     /// Source URL shown muted and read-only while a DevTools tab is focused.
     private var showingDevToolsSource = false
@@ -401,10 +405,20 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         star.action = #selector(starTapped)
         star.translatesAutoresizingMaskIntoConstraints = false
 
+        kvmBadge.translatesAutoresizingMaskIntoConstraints = false
+        kvmBadge.isHidden = true
         addSubview(textField)
         addSubview(icon)
         addSubview(braces)
         addSubview(star)
+        addSubview(kvmBadge)
+        let toStar = textField.trailingAnchor.constraint(equalTo: star.leadingAnchor, constant: -MonoMetrics.fieldGap)
+        let toBadge = textField.trailingAnchor.constraint(equalTo: kvmBadge.leadingAnchor, constant: -MonoMetrics.fieldGap)
+        toBadge.isActive = false
+        let badgeWidth = kvmBadge.widthAnchor.constraint(equalToConstant: 0)
+        textToStar = toStar
+        textToBadge = toBadge
+        kvmBadgeWidth = badgeWidth
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: MonoMetrics.urlPadding),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -419,11 +433,30 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
             star.widthAnchor.constraint(equalToConstant: MonoMetrics.starHit),
             star.heightAnchor.constraint(equalToConstant: MonoMetrics.starHit),
             textField.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: MonoMetrics.fieldGap),
-            textField.trailingAnchor.constraint(equalTo: star.leadingAnchor, constant: -MonoMetrics.fieldGap),
+            toStar,
             textField.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            textField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+            textField.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            kvmBadge.trailingAnchor.constraint(equalTo: star.leadingAnchor, constant: -4),
+            kvmBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            kvmBadge.heightAnchor.constraint(equalToConstant: 18),
+            badgeWidth
         ])
         applyDisplay()
+    }
+
+    /// KVM pill in the URL strip. Hidden for terminal tabs, DevTools, and sites that are not in the list.
+    func setKVM(_ state: KVMAddressBadgeView.State) {
+        kvmBadge.apply(state)
+        let show = state != .off
+        kvmBadge.isHidden = !show
+        if show {
+            textToStar?.isActive = false
+            textToBadge?.isActive = true
+        } else {
+            textToBadge?.isActive = false
+            textToStar?.isActive = true
+        }
+        kvmBadgeWidth?.constant = show ? kvmBadge.preferredWidth : 0
     }
 
     @available(*, unavailable)
@@ -458,6 +491,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         showingDevToolsSource = false
         braces.isHidden = true
         icon.isHidden = false
+        setKVM(.off)
         pageURL = url
         textField.isEditable = true
         toolTip = nil
@@ -492,6 +526,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         textField.isSelectable = true
         icon.isHidden = true
         braces.isHidden = false
+        setKVM(.off)
         star.isEnabled = canBookmark
         star.tint = bookmarked ? Theme.accent : Theme.mute
         star.setAccessibilityLabel(bookmarked ? "Remove Bookmark" : "Add Bookmark")
@@ -518,6 +553,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         commandText = command
         commandCaption = caption
         pageURL = nil
+        setKVM(.off)
         textField.isEditable = false
         textField.isSelectable = true
         icon.isHidden = false

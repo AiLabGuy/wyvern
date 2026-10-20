@@ -1,6 +1,6 @@
 # Backlog
 
-Ideas that are wanted but not scheduled. Nothing here is implemented yet.
+Ideas that are wanted but not scheduled. Per-site KVM mode shipped in wave 3. The rest of that section is still open.
 
 ## Browser-based KVM mode (JetKVM and similar)
 
@@ -25,15 +25,25 @@ makes it nearly unusable. The goal is to make Wyvern the best browser for browse
   Command-Tab where possible, Command-Q) to the remote side instead of Wyvern, with a clear,
   documented escape key to get the shortcuts back.
 - Pointer lock (relative mouse) and correct absolute-pointer mapping when the view is scaled.
+  Still open.
 - Do not treat the KVM view as media: no picture-in-picture offer, no Now Playing / media-key
   hijack, no autoplay or power-saving pauses on the video track.
+  Picture-in-picture, remote playback, and background suspend shipped in wave 3.
+  Now Playing and media keys beyond the media session are still open.
 - Element fullscreen and window fullscreen that keep keyboard capture.
 - Clipboard: paste-as-keystrokes and copy back, only on a user gesture.
+  Still open.
 - Low-latency settings: no throttling of background/occluded KVM tabs, no timer coalescing.
+  Background suspend is off for KVM origins on macOS 14 and later (wave 3). Timer coalescing is still open.
 - A per-site "KVM mode" that turns the above on for one origin (for example
   `https://kvm.example.lan`), shown in the address bar while active.
+  **Shipped in wave 3.** View → KVM Mode for This Site. Command, Option, and Control
+  go to the focused page. Control-Option-Command-K pauses capture. Still open from this
+  list: pointer lock, and clipboard paste-as-keystrokes.
 
 ## RDP tab type
+
+Next: first slice = launcher; tiled tab needs a FreeRDP helper (see docs/STREAM-LAYER.md).
 
 **What.** A new tab kind next to terminal (CLI) tabs. The new-tab right-click menu offers
 **CLI** or **RDP**. An RDP tab connects to a saved, named machine (for example `my-desktop`)

@@ -103,6 +103,12 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     private var mainFrameStartsPending = 0
     private var probeSeen = Set<String>()
     private(set) var blockedRequestCount = 0
+    /// Escape combo pauses key capture for this tab only. Not written to settings.
+    var kvmCaptureSuspended = false
+    /// True after the media script has run in the current document.
+    private var kvmMediaInstalled = false
+    /// True after this web view was set to `InactiveSchedulingPolicy.none` for a KVM origin.
+    private var kvmInactivePolicyIsNone = false
 
     static let blankURL: URL = {
         if let url = URL(string: "about:blank") {
@@ -134,6 +140,8 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     /// When true, ordinary web pages are inspectable. Internal pages stay closed.
     /// Set at launch and when Show Develop menu changes. Off until that setting is on.
     static var developerToolsEnabled = false
+    /// Origins in KVM mode. AppDelegate copies this from settings. Other pages are left alone.
+    static var kvmSites = KVMSiteList()
 
     /// WebKit preference keys that turn off GPU canvas and WebGL. Each is set only if KVC accepts it.
     static let softwareRenderingKeys = ["acceleratedDrawingEnabled", "canvasUsesAcceleratedDrawing", "webGLEnabled"]
@@ -533,6 +541,38 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             displayedURL = webView.url
             host?.browserTabDidUpdate(self, progressOnly: false)
         }
+        applyKVMMediaPolicy(newDocument: true)
+    }
+
+    /// Main frame only: `evaluateJavaScript` runs in the page, not in a subframe.
+    /// A new document does not run the undo script, so a normal site is not touched.
+    func applyKVMMediaPolicy(newDocument: Bool) {
+        guard didShutdown == false else { return }
+        let pageURL = surface == .web ? (webView.url ?? displayedURL) : nil
+        let enabled = pageURL.map { Self.kvmSites.contains($0) } ?? false
+        applyKVMScheduling(enabled: enabled)
+        if newDocument {
+            kvmMediaInstalled = false
+        }
+        if enabled {
+            webView.evaluateJavaScript(KVMMediaScript.source) { _, _ in }
+            kvmMediaInstalled = true
+        } else if kvmMediaInstalled {
+            webView.evaluateJavaScript(KVMMediaScript.undo) { _, _ in }
+            kvmMediaInstalled = false
+        }
+    }
+
+    /// macOS 14+ keeps a KVM tab scheduled while it is occluded. Leaving the origin restores `.suspend`.
+    /// Pages that were never a KVM origin are not written, so their scheduling stays at the WebKit default.
+    private func applyKVMScheduling(enabled: Bool) {
+        guard #available(macOS 14.0, *) else { return }
+        if enabled == kvmInactivePolicyIsNone { return }
+        kvmInactivePolicyIsNone = enabled
+        let policy: WKPreferences.InactiveSchedulingPolicy = enabled
+            ? WKPreferences.InactiveSchedulingPolicy.none
+            : WKPreferences.InactiveSchedulingPolicy.suspend
+        webView.configuration.preferences.inactiveSchedulingPolicy = policy
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -549,6 +589,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         pullFromWebView()
         scheduleFaviconFetch()
         host?.browserTabDidSettle(self)
+        applyKVMMediaPolicy(newDocument: false)
     }
 
     func absorbProbeURLs(_ urls: [String]) {

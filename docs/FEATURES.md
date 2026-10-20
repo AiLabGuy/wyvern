@@ -137,3 +137,17 @@ A file is used only when its extension (and its type, when the system reports on
 Right-click a bookmark in the bookmarks list or in the bookmarks table and choose Set Icon… or Reset Icon. The image replaces the letter tile for that bookmark on the bookmarks page, on the new-tab page, and in the Bookmarks menu. Removing the bookmark removes its icon.
 
 Site tab icon takes a host such as `example.com` (a pasted address is reduced to that host, and a non-default port is kept). Choose… stores an image for that host. Tabs for the host show it instead of the site's favicon. Remove deletes it. `www.example.com` and `example.com` are different hosts.
+
+## KVM mode
+
+A web KVM (for example `https://kvm.example.lan`) needs shortcuts that a browser usually keeps for itself. **View → KVM Mode for This Site** turns that on for the current page's origin. The item is checked while the origin is in the list. It is disabled on a terminal tab, the new-tab page, bookmarks, and any page that is not http or https. There is no menu shortcut.
+
+The origin is the scheme, host, and port. The host is stored in lowercase, and the default port (80 or 443) is left out. A path or query does not matter: every page on that origin uses the same setting. The list is saved with the other settings.
+
+While KVM mode is on and the web page is focused, Command, Option, and Control combinations go to the page. That includes Command-W, Command-Q, Command-T, Command-L, Command-N, Command-`, and Control-Tab. Keys without those modifiers are unchanged. The address bar shows a **KVM** badge. Its tooltip and accessibility label name the escape keys.
+
+Videos on that page do not offer picture-in-picture or remote playback, and media-session actions are cleared. Other sites are unchanged. On macOS 14 and later, a tab whose page is a KVM origin is not suspended while it is in the background. Leaving the origin restores the normal suspend policy.
+
+**Control-Option-Command-K** pauses capture for that tab. The badge changes to **KVM paused**, a short notice appears, and Wyvern's shortcuts work again. The same keys resume capture. The pause lasts only for that tab, until the tab is closed. If the address field or another control is focused, shortcuts stay with Wyvern, including the escape keys.
+
+Command-Tab and other system shortcuts stay with macOS. Wyvern cannot send those to the page.
