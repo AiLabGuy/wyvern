@@ -121,7 +121,8 @@ final class KVMAddressBadgeView: NSView {
     private static func width(for text: String, font: NSFont) -> CGFloat {
         guard text.isEmpty == false else { return 0 }
         let size = (text as NSString).size(withAttributes: [.font: font])
-        return ceil(size.width) + 16
+        // The label cell adds about 2 points of padding on each side, so leave room beyond the 8-point insets.
+        return ceil(size.width) + 24
     }
 }
 
