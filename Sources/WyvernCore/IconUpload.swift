@@ -327,7 +327,6 @@ public enum IconUpload {
         let typeEnd = data.index(typeStart, offsetBy: 4)
         guard [UInt8](data[typeStart..<typeEnd]) == [0x49, 0x48, 0x44, 0x52] else { return nil }
         guard let width = be32(16), let height = be32(20) else { return nil }
-        guard width <= UInt32(Int.max), height <= UInt32(Int.max) else { return nil }
         return (Int(width), Int(height))
     }
 
