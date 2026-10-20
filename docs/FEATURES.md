@@ -1,5 +1,20 @@
 # Features
 
+## Appearance themes
+
+Settings → Appearance still starts with **Light**, **Dark**, and **Match System**. Those keep the original Graphite Depth palettes and still follow the window appearance the same way they always have.
+
+Four named palettes sit on the row below:
+
+- **Hermes** — deep navy chrome (`#0B2A6F`…`#123C8C`) with gold selection, focus, and active-tab indicators (`#F2C230`). Primary buttons use a darker gold fill so white labels stay readable.
+- **Graphite** — midnight graphite chrome, steel accent.
+- **Paper** — warm paper / sepia light chrome.
+- **Nord** — cool polar-night blue-grey with frost accents.
+
+Each palette defines every chrome token (tab strip, address bar, sidebars, settings, tile pane, terminal tabs, and popovers that use `Theme` colors). Switching a radio updates open windows immediately. Match System remains the appearance-aware choice for the default pair; named palettes use a matching light or dark system appearance so widgets follow the chrome.
+
+Text on chrome, page, and the selected tab meets WCAG AA (4.5:1). Accent indicators meet 3:1 against their background.
+
 ## Split view
 
 A window shows one split group of 2, 3, or 4 panes. The layouts are 2 columns, 2 rows, 3 columns, a 2×2 grid, and 1 + 2 (a large pane on the left, two stacked on the right). Web tabs, terminal tabs, and a DevTools tab can share that group. The model test for a mixed group is `testMixedLayoutTerminalDevToolsAndWeb`.
@@ -34,6 +49,8 @@ The tab's context menu, after the existing items, offers **Split with Current Ta
 
 Drag a tab from the strip onto the page. Within 25% of the left edge, the right edge, or the bottom edge, a drop preview appears after 150 ms: accent at 12% fill, a 2 px accent dashed outline, radius 8. The fade is 120 ms. Dropping tiles the tab even if the preview has not appeared yet. A release on the page that is not an edge target, and is more than 24 points from the tab strip, detaches the tab into a new window. A release closer to the strip than that, with no edge target, cancels. Esc cancels the drag, including a reorder in the strip. Dragging onto an existing pane's edge inserts next to that pane. The left and top edges place the tab on that side of the pane. Reduced motion shows the preview immediately and skips the fade.
 
+While tabs are tiled, drag a member from the strip or from that pane's header pill onto the **center** of another pane to swap the two occupants. The center is the inner 50% of the tile (outside the 25% edge bands; the top band is also center unless the dragged tab is DevTools). Shape and sizes stay put. The same dashed preview covers the whole target pane, captioned **Swap with** plus that pane's name. Esc still cancels. The strip and split capsule follow the new reading order, and focus stays on the dragged tab.
+
 Limits of that drag: moving a tab inside an existing split snaps the tree back to one of the five layouts. A drop does not replace a saved split that belongs to other tabs while those tabs are hidden, and no edge preview is drawn in that case. Split Below on the leading pane of a 2-pane split is refused, because the 1+2 layout cannot divide that pane; the preview is not shown, and Split Below on the other pane stacks the new tab on that pane's side. The preview is drawn from `mouseDragged`. If that event is not delivered, the preview stays hidden, and mouse-up still tiles when the pointer is in an edge zone that can accept the drop.
 
 ### Panes, dividers, and the tab strip
@@ -59,6 +76,10 @@ Unfocused visible panes are specified to probe every 6 seconds (`PaneProbeCadenc
 ### Session restore
 
 The split is saved with the window. A session saved before split view still opens. A damaged tile record does not drop the window's tabs. A saved DevTools tab is restored when its source page is restored with it. A DevTools-only window is not restored from disk. Replacing the terminal in a pane keeps the split and swaps in the new terminal.
+
+### Tab tear-off
+
+Drag a tab off the strip into empty space to open it in a new window. The source window stays where it is; a snapshot of the tab follows the pointer. Drop that snapshot onto another Wyvern window's tab strip to insert the tab there. Escape cancels. If the window has only that one tab, dropping in empty space moves the window to the pointer instead of leaving an empty frame; dropping that last tab onto another window's strip still moves the tab and closes the empty source.
 
 ## Develop menu
 
@@ -104,3 +125,15 @@ The toolbar shows a blocked-count badge on ordinary http and https pages, to the
 WebKit does not report content-blocker hits, so the count is the number of page images, scripts, frames, and similar URLs whose hosts are on a list and not allowed. It does not see `fetch`, XHR, `sendBeacon`, CSS `url()`, or WebSockets. A `srcset` candidate can be counted even if it was never requested. Counts are unique URLs, not retries. A blocked main-frame navigation never runs the counter, and an in-page `pushState` does not reset it.
 
 Click the badge for the count on that site, **Pause on this site**, and **Block List Settings…**. Pause adds the site to Allowed Sites (a leading `www.` is folded into the same host) and stays in sync with that list. **Reload** in the popover reloads the focused tab. Rules are installed immediately; open pages keep the previous rules until you reload. Settings shows **Reload pages to apply** for a few seconds, with **Reload All**. Cookie rules stay in effect at the same time.
+
+## Custom icons
+
+Settings → Appearance → Icons chooses the Dock icon and optional per-site tab icons.
+
+The app icon is the built-in Default (the same mark shipped in the app), or Graphite, Hermes, or Neon. Those three are recolors of that mark, not a different drawing. Choose… replaces it with your own PNG, JPEG, ICNS, or HEIC image. Reset to Default puts the shipped icon back. The Dock icon changes while Wyvern is running. Finder keeps the app's signed icon; an unsigned app cannot change that without breaking its code signature.
+
+A file is used only when its extension (and its type, when the system reports one) and its contents agree on PNG, JPEG, ICNS, or HEIC. A PNG renamed to another extension is refused. SVG, XML, PDF, and other files are refused, including when they are named `.png`. Files larger than 5 MB are refused. The image is scaled so its longest side is at most 512 pixels and stored as a PNG under Application Support, in an Icons folder only this user can read. The file name is chosen by Wyvern.
+
+Right-click a bookmark in the bookmarks list or in the bookmarks table and choose Set Icon… or Reset Icon. The image replaces the letter tile for that bookmark on the bookmarks page, on the new-tab page, and in the Bookmarks menu. Removing the bookmark removes its icon.
+
+Site tab icon takes a host such as `example.com` (a pasted address is reduced to that host, and a non-default port is kept). Choose… stores an image for that host. Tabs for the host show it instead of the site's favicon. Remove deletes it. `www.example.com` and `example.com` are different hosts.

@@ -103,6 +103,10 @@ final class TileCanvasView: NSView {
     var onDevToolsOverflow: ((UUID, NSView) -> Void)?
     /// The tree was rebuilt and hosted views were detached. The window restores key focus.
     var onStructureChange: (() -> Void)?
+    /// Pane-pill drag. Screen points. Press arms Esc cancel; changed/ended drive the drop.
+    var onPaneDragPress: ((UUID) -> Void)?
+    var onPaneDragChanged: ((UUID, NSPoint) -> Void)?
+    var onPaneDragEnded: ((UUID, NSPoint) -> Void)?
 
     private(set) var model: TileLayout?
     private var content: ((UUID, Bool) -> TilePanePresentation?)?
@@ -218,6 +222,8 @@ final class TileCanvasView: NSView {
             structureChanged = true
             rebuild(using: displayed)
             builtSignature = signature
+        } else {
+            rebindPaneIDs(from: displayed)
         }
         refreshContent()
         // Layout the canvas once. Marking it dirty again from inside `layout()` loops forever.
@@ -529,10 +535,54 @@ final class TileCanvasView: NSView {
         return source?.split(id: id)
     }
 
+    /// Occupant-only updates keep each hosted view in its pane. Pane views move to the
+    /// new slots so WKWebView is not removed and inserted again.
+    private func rebindPaneIDs(from layout: TileLayout) {
+        let ids = layout.tabIDs()
+        guard ids.count == panes.count else { return }
+        if panes.map(\.tabID) == ids { return }
+        let byID = Dictionary(uniqueKeysWithValues: panes.map { ($0.tabID, $0) })
+        guard ids.allSatisfy({ byID[$0] != nil }) else {
+            for (pane, id) in zip(panes, ids) where pane.tabID != id {
+                pane.tabID = id
+            }
+            return
+        }
+        let ordered = ids.map { byID[$0]! }
+        let slots: [(TileSplitView, Int)] = panes.compactMap { pane in
+            guard let parent = pane.superview as? TileSplitView,
+                  let index = parent.nodeViews.firstIndex(where: { $0 === pane }) else {
+                return nil
+            }
+            return (parent, index)
+        }
+        guard slots.count == ordered.count else {
+            for (pane, id) in zip(panes, ids) where pane.tabID != id {
+                pane.tabID = id
+            }
+            return
+        }
+        for (slot, pane) in zip(slots, ordered) {
+            let (parent, index) = slot
+            parent.nodeViews[index] = pane
+            if pane.superview !== parent {
+                if let divider = parent.dividers.first {
+                    parent.addSubview(pane, positioned: .below, relativeTo: divider)
+                } else {
+                    parent.addSubview(pane)
+                }
+            }
+        }
+        panes = ordered
+        relayoutSplits()
+    }
+
+    /// Structure only: split ids, axes, and child shape. Occupant (tab id) changes
+    /// rebind existing pane views so hosted web views are not removed and re-added.
     private static func signature(of node: TileNode) -> String {
         switch node {
-        case .pane(let pane):
-            return "p:" + pane.tabID.uuidString
+        case .pane:
+            return "p"
         case .split(let split):
             let children = split.children.map { signature(of: $0) }.joined(separator: ",")
             return "s:" + split.id.uuidString + ":" + split.axis.rawValue + "[" + children + "]"
@@ -951,7 +1001,7 @@ enum TileCursors {
 
 @MainActor
 final class TilePaneView: NSView {
-    let tabID: UUID
+    var tabID: UUID
     weak var canvas: TileCanvasView?
     var showsFocus = false {
         didSet { overlay.showsFocus = showsFocus }
@@ -967,6 +1017,8 @@ final class TilePaneView: NSView {
     private var hosted: NSView?
     private var hostedInsets = NSEdgeInsets()
     private var pins: [NSLayoutConstraint] = []
+    /// Set while the hosted web view is in element fullscreen. The next install pins it again.
+    private var repinAfterFullscreen = false
     private let overlay = TileFocusOverlay()
     private let pill = TilePanePill()
     private var tracking: NSTrackingArea?
@@ -1008,6 +1060,18 @@ final class TilePaneView: NSView {
             guard let self else { return }
             self.canvas?.onDevToolsOverflow?(self.tabID, button)
         }
+        pill.onDragPress = { [weak self] in
+            guard let self else { return }
+            self.canvas?.onPaneDragPress?(self.tabID)
+        }
+        pill.onDragChanged = { [weak self] point in
+            guard let self else { return }
+            self.canvas?.onPaneDragChanged?(self.tabID, point)
+        }
+        pill.onDragEnded = { [weak self] point in
+            guard let self else { return }
+            self.canvas?.onPaneDragEnded?(self.tabID, point)
+        }
         addSubview(pill)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
@@ -1029,16 +1093,25 @@ final class TilePaneView: NSView {
             needsDisplay = true
         }
         let next = presentation?.content?.tileView
-        if hosted === next, (next == nil || next?.superview === self), sameInsets(hostedInsets, insets) {
+        // WebKit owns a web view while it is in element fullscreen. Leave it there and forget the
+        // pins, so the next install after fullscreen ends pins it again in this pane.
+        if let next, next.isInElementFullscreen {
+            // Leave pins and `hosted` alone while WebKit snapshots and moves the view.
+            repinAfterFullscreen = true
+            return
+        }
+        if hosted === next, !repinAfterFullscreen, (next == nil || next?.superview === self), sameInsets(hostedInsets, insets) {
             next?.isHidden = false
             return
         }
         if hosted === next, let next, next.superview === self {
             next.isHidden = false
             replacePins(on: next, insets: insets)
+            repinAfterFullscreen = false
             needsDisplay = true
             return
         }
+        repinAfterFullscreen = false
         clearHost()
         guard let next else { return }
         // Already in this pane: do not remove it. Removal flashes a WKWebView.
@@ -1083,7 +1156,7 @@ final class TilePaneView: NSView {
     func clearHost() {
         NSLayoutConstraint.deactivate(pins)
         pins.removeAll()
-        if let hosted, hosted.superview === self {
+        if let hosted, hosted.superview === self, !hosted.isInElementFullscreen {
             Self.detach(hosted)
         }
         hosted = nil
@@ -1092,7 +1165,7 @@ final class TilePaneView: NSView {
 
     func refreshChrome() {
         let inside = keyboardFocusIsInside()
-        pill.isHidden = !(hoverReady || pointerInTop || inside)
+        pill.isHidden = !(hoverReady || pointerInTop || inside || pill.isTrackingDrag)
         updateCornerRadii()
     }
 
@@ -1309,6 +1382,9 @@ final class TilePanePill: NSView {
     var onMove: ((NSView) -> Void)?
     var onPopOut: (() -> Void)?
     var onOverflow: ((NSView) -> Void)?
+    var onDragPress: (() -> Void)?
+    var onDragChanged: ((NSPoint) -> Void)?
+    var onDragEnded: ((NSPoint) -> Void)?
 
     private let moveButton = ToolButton()
     private let mainButton = ToolButton()
@@ -1320,11 +1396,17 @@ final class TilePanePill: NSView {
     private var moveGap: NSLayoutConstraint?
     private var overflowWidth: NSLayoutConstraint?
     private var overflowGap: NSLayoutConstraint?
+    private var dragOriginInWindow: NSPoint?
+    private var dragArmed = false
+    private var dragStarted = false
+    private var pressedControl: NSView?
 
     var preferredWidth: CGFloat {
         let buttons: CGFloat = style == .devtools ? 4 : 2
         return 6 + buttons * 18 + (buttons - 1) * 4 + 8
     }
+
+    var isTrackingDrag: Bool { dragArmed }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -1443,6 +1525,78 @@ final class TilePanePill: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The pill owns the press so a drag from a button still swaps, and a click still fires.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden else { return nil }
+        // `point` is in the superview's coordinates.
+        let local = superview.map { convert(point, from: $0) } ?? point
+        return bounds.contains(local) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        pressedControl = visibleControl(at: local)
+        (pressedControl as? NSButton)?.isHighlighted = true
+        dragOriginInWindow = event.locationInWindow
+        dragArmed = true
+        dragStarted = false
+        onDragPress?()
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard dragArmed, let origin = dragOriginInWindow else { return }
+        let dx = event.locationInWindow.x - origin.x
+        let dy = event.locationInWindow.y - origin.y
+        if !dragStarted {
+            guard TabDragPolicy.dragHasStarted(travelSquared: Double(dx * dx + dy * dy)) else { return }
+            dragStarted = true
+            (pressedControl as? NSButton)?.isHighlighted = false
+            pressedControl = nil
+        }
+        onDragChanged?(screenPoint(of: event))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let started = dragStarted
+        let control = pressedControl
+        (control as? NSButton)?.isHighlighted = false
+        dragArmed = false
+        dragStarted = false
+        dragOriginInWindow = nil
+        pressedControl = nil
+        if started {
+            onDragEnded?(screenPoint(of: event))
+            return
+        }
+        performPress(on: control)
+    }
+
+    private func visibleControl(at local: NSPoint) -> NSView? {
+        let controls: [NSView] = [moveButton, mainButton, closeButton, overflowButton]
+        return controls.first { !$0.isHidden && $0.frame.contains(local) }
+    }
+
+    private func performPress(on control: NSView?) {
+        switch control {
+        case moveButton: movePane()
+        case mainButton: makeMain()
+        case closeButton: closePane()
+        case overflowButton: overflow()
+        default: break
+        }
+    }
+
+    private func screenPoint(of event: NSEvent) -> NSPoint {
+        if let host = event.window {
+            return host.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+        }
+        return NSEvent.mouseLocation
     }
 
     @objc private func makeMain() {
@@ -1676,6 +1830,18 @@ final class WindowTiles {
         guard next != layout else { return false }
         cancelRatioAnimation()
         self.layout = next
+        onChange?()
+        return true
+    }
+
+    /// Swaps two tiled occupants. Focus stays on `a`. Shape and ratios stay put.
+    @discardableResult
+    func swap(_ a: UUID, with b: UUID) -> Bool {
+        guard let layout else { return false }
+        let next = layout.swapping(a, b)
+        guard next != layout else { return false }
+        cancelRatioAnimation()
+        self.layout = next.contains(a) ? next.focusing(a) : next
         onChange?()
         return true
     }

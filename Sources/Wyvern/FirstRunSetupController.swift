@@ -780,8 +780,11 @@ final class FirstRunSetupController: NSWindowController, NSWindowDelegate {
 
     @objc private func appearancePicked(_ sender: NSButton) {
         let preference = preference(for: sender.tag)
-        settings.update { $0.appearance = preference }
-        AppearanceController.apply(preference)
+        settings.update {
+            $0.appearance = preference
+            $0.colorTheme = .standard
+        }
+        AppearanceController.apply(preference, colorTheme: .standard)
         NotificationCenter.default.post(name: .wyvernSettingsDidChange, object: settings)
         func walk(_ view: NSView) {
             if let choice = view as? AppearanceChoice {

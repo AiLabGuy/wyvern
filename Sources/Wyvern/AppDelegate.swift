@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     private var restorePrompt: SessionRestorePrompt?
     private var suppressSessionSaves = false
     private var appliedCookiePolicy: CookiePolicy?
+    private var appliedAppearance: AppearancePreference?
+    private var appliedColorTheme: ColorTheme?
     private var settingsObserver: NSObjectProtocol?
     private let bookmarksMenu = NSMenu(title: "Bookmarks")
     private let terminalMenu = NSMenu(title: "New Terminal Tab")
@@ -33,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     /// Retitled between Show and Hide Web Inspector.
     var showWebInspectorItem: NSMenuItem?
     private var tabKeyMonitor: Any?
+    private var iconPruneObserver: NSObjectProtocol?
     private var didApplyLaunchWindow = false
     /// URLs from `application(_:open:)` before the first browser window exists.
     private var pendingOpenURLs: [URL] = []
@@ -77,9 +80,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func applicationDidFinishLaunching(_ notification: Notification) {
         BenchMarks.emit("application-did-finish-launching")
         if let appearance = launchConfig.appearance {
-            settings.update { $0.appearance = appearance }
+            settings.update {
+                $0.appearance = appearance
+                $0.colorTheme = .standard
+            }
         }
-        AppearanceController.apply(settings.settings.appearance)
+        AppearanceController.apply(settings.settings.appearance, colorTheme: settings.settings.colorTheme)
+        appliedAppearance = settings.settings.appearance
+        appliedColorTheme = settings.settings.colorTheme
+        IconController.shared.applyDockIcon()
+        iconPruneObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernBookmarksDidChange,
+            object: bookmarkStore,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                IconController.shared.library.pruneBookmarks(
+                    keeping: Set(self.bookmarkStore.bookmarks.map(\.id))
+                )
+            }
+        }
         BrowserTab.hardwareAcceleration = settings.settings.hardwareAcceleration
         BrowserTab.defaultFontSize = settings.settings.defaultFontSize
         BrowserTab.defaultZoomPercent = settings.settings.defaultZoomPercent
@@ -125,6 +146,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationWillTerminate(_ notification: Notification) {
         session.finish()
+        if let iconPruneObserver {
+            NotificationCenter.default.removeObserver(iconPruneObserver)
+            self.iconPruneObserver = nil
+        }
         if let tabKeyMonitor {
             NSEvent.removeMonitor(tabKeyMonitor)
             self.tabKeyMonitor = nil
@@ -377,15 +402,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func presentDevToolsWindow(_ tab: SessionTab) {
         let controller = installWindow()
         controller.shouldCascadeWindows = false
-        if let frame = Self.rememberedDevToolsWindowFrame() {
+        var sourceID: UUID?
+        if case .devtools(let tools) = tab {
+            sourceID = tools.sourceID
+        }
+        // Last frame for this source tab, else the last frame of any DevTools window, else 900x640 centered.
+        // Lower the browser-window minimum first, or AppKit grows the frame to 980x640.
+        let minimum = NSSize(width: DevToolsWindowFrames.minimumWidth, height: DevToolsWindowFrames.minimumHeight)
+        controller.window?.minSize = minimum
+        controller.window?.contentMinSize = minimum
+        let remembered = sourceID.flatMap { Self.rememberedDevToolsWindowFrame(source: $0) } ?? Self.rememberedDevToolsWindowFrame()
+        if let frame = remembered, Self.frameIsOnScreen(frame) {
             controller.window?.setFrame(frame, display: false)
         } else {
-            controller.window?.setFrame(NSRect(x: 0, y: 0, width: 900, height: 640), display: false)
+            let size = NSSize(width: DevToolsWindowFrames.defaultWidth, height: DevToolsWindowFrames.defaultHeight)
+            controller.window?.setFrame(NSRect(origin: .zero, size: size), display: false)
             controller.window?.center()
         }
         controller.showWindow(nil)
         controller.adopt(tab: tab, at: 0)
+        controller.refreshWindowMinimumSize()
         controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// A remembered frame from a display that is gone would open the window off screen.
+    private static func frameIsOnScreen(_ frame: NSRect) -> Bool {
+        NSScreen.screens.contains { $0.visibleFrame.intersects(frame) }
+    }
+
+    static let devToolsSourceFramesKey = "wyvern.devtools.windowFramesBySource"
+
+    static func rememberedDevToolsWindowFrame(source: UUID) -> NSRect? {
+        let frames = DevToolsWindowFrames.decode(AppLocations.userDefaults.data(forKey: devToolsSourceFramesKey))
+        guard let frame = frames.frame(for: source) else { return nil }
+        return NSRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+    }
+
+    static func rememberDevToolsWindowFrame(_ frame: NSRect, source: UUID) {
+        var frames = DevToolsWindowFrames.decode(AppLocations.userDefaults.data(forKey: devToolsSourceFramesKey))
+        frames.remember(
+            DevToolsWindowFrames.Frame(x: frame.origin.x, y: frame.origin.y, width: frame.size.width, height: frame.size.height),
+            for: source
+        )
+        if let data = frames.encoded() {
+            AppLocations.userDefaults.set(data, forKey: devToolsSourceFramesKey)
+        }
+        rememberDevToolsWindowFrame(frame)
     }
 
     static let devToolsWindowFrameKey = "wyvern.devtools.windowFrame"
@@ -997,6 +1059,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                 entry.target = self
                 entry.representedObject = bookmark.id.uuidString
                 entry.toolTip = bookmark.url
+                if let icon = IconController.shared.image(forBookmark: bookmark.id)?.copy() as? NSImage {
+                    icon.size = NSSize(width: 16, height: 16)
+                    entry.image = icon
+                }
                 bookmarksMenu.addItem(entry)
             }
         }
@@ -1229,6 +1295,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if current.cookiePolicy != appliedCookiePolicy {
             appliedCookiePolicy = current.cookiePolicy
             CookiePolicyController.shared.apply(current.cookiePolicy)
+        }
+        if current.appearance != appliedAppearance || current.colorTheme != appliedColorTheme {
+            appliedAppearance = current.appearance
+            appliedColorTheme = current.colorTheme
+            AppearanceController.apply(current.appearance, colorTheme: current.colorTheme)
         }
     }
 }

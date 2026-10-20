@@ -49,6 +49,8 @@ public struct AppSettings: Equatable, Sendable {
 
     public var schemaVersion: Int
     public var appearance: AppearancePreference
+    /// Named chrome palette. `standard` uses the existing Light/Dark pair.
+    public var colorTheme: ColorTheme
     public var searchEngineID: String
     public var customSearchTemplate: String
     /// False until the person confirms the first-launch engine sheet.
@@ -88,6 +90,7 @@ public struct AppSettings: Equatable, Sendable {
     public init(
         schemaVersion: Int = AppSettings.currentSchemaVersion,
         appearance: AppearancePreference,
+        colorTheme: ColorTheme = .standard,
         searchEngineID: String,
         customSearchTemplate: String,
         didChooseSearchEngine: Bool,
@@ -113,6 +116,7 @@ public struct AppSettings: Equatable, Sendable {
     ) {
         self.schemaVersion = schemaVersion
         self.appearance = appearance
+        self.colorTheme = colorTheme
         self.searchEngineID = searchEngineID
         self.customSearchTemplate = customSearchTemplate
         self.didChooseSearchEngine = didChooseSearchEngine
@@ -193,6 +197,12 @@ public struct AppSettings: Equatable, Sendable {
         }
     }
 
+    /// Stored named palettes stay as written. Unknown and missing become the default pair.
+    public static func migrateColorTheme(_ raw: String?) -> ColorTheme {
+        guard let raw else { return .standard }
+        return ColorTheme(rawValue: raw.lowercased()) ?? .standard
+    }
+
     public static func migrateCookiePolicy(_ raw: String?) -> CookiePolicy {
         guard let raw, let policy = CookiePolicy(rawValue: raw) else { return .allowAll }
         return policy
@@ -208,6 +218,7 @@ extension AppSettings: Codable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion
         case appearance
+        case colorTheme
         case searchEngineID
         case customSearchTemplate
         case didChooseSearchEngine
@@ -238,6 +249,8 @@ extension AppSettings: Codable {
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         let rawAppearance = try container.decodeIfPresent(String.self, forKey: .appearance)
         appearance = AppSettings.migrateAppearance(rawAppearance)
+        let rawTheme = try container.decodeIfPresent(String.self, forKey: .colorTheme)
+        colorTheme = AppSettings.migrateColorTheme(rawTheme)
         searchEngineID = try container.decodeIfPresent(String.self, forKey: .searchEngineID)
             ?? SearchEngine.duckDuckGo.id
         customSearchTemplate = try container.decodeIfPresent(String.self, forKey: .customSearchTemplate) ?? ""
@@ -270,6 +283,7 @@ extension AppSettings: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(schemaVersion, forKey: .schemaVersion)
         try container.encode(appearance, forKey: .appearance)
+        try container.encode(colorTheme, forKey: .colorTheme)
         try container.encode(searchEngineID, forKey: .searchEngineID)
         try container.encode(customSearchTemplate, forKey: .customSearchTemplate)
         try container.encode(didChooseSearchEngine, forKey: .didChooseSearchEngine)

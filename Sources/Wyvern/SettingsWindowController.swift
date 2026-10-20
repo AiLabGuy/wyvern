@@ -121,9 +121,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let sitePermissions: SitePermissionStore
     private let updater: AppUpdater?
     private let terminalBookmarks: TerminalBookmarkStore
-    private let systemChoice = SettingsThemeChoice(title: "Match System", preference: .system)
-    private let lightChoice = SettingsThemeChoice(title: "Light", preference: .light)
-    private let darkChoice = SettingsThemeChoice(title: "Dark", preference: .dark)
+    private let themeChoiceButtons: [SettingsThemeChoice] = ThemeChoice.allCases.map {
+        SettingsThemeChoice(title: $0.displayName, choice: $0)
+    }
     private let hideWebToggle = SettingsSwitch(label: "Hide web tabs")
     private let hideTerminalToggle = SettingsSwitch(label: "Hide terminal tabs")
     private let netHealthToggle = SettingsSwitch(label: "Show network health")
@@ -176,6 +176,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let chooseDownloadsButton = DepthButton(title: "Choose…", kind: .secondary)
     private let manageSiteDataButton = DepthButton(title: "Manage site data…", kind: .secondary)
     private let blockListSettings = BlockListSettingsPane()
+    private let iconSection = IconSettingsSection()
     var blockListObserver: NSObjectProtocol?
     private var siteDataSheet: SiteDataSheetController?
     private var bookmarkEditor: TerminalBookmarkEditor?
@@ -445,16 +446,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     private func configureChoices() {
-        let choices = [lightChoice, darkChoice, systemChoice]
-        let ids = [
-            "wyvern.settings.lightAppearance",
-            "wyvern.settings.appearance.dark",
-            "wyvern.settings.appearance.system"
-        ]
-        for (choice, id) in zip(choices, ids) {
+        for choice in themeChoiceButtons {
             choice.target = self
             choice.action = #selector(appearancePicked(_:))
-            choice.setAccessibilityIdentifier(id)
+            choice.setAccessibilityIdentifier(choice.themeChoice.settingsIdentifier)
             choice.translatesAutoresizingMaskIntoConstraints = false
             choice.heightAnchor.constraint(equalToConstant: 102).isActive = true
         }
@@ -543,16 +538,30 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             to: column
         )
         addGroup("Theme", to: column, after: subtitle)
-        let themes = NSStackView(views: [lightChoice, darkChoice, systemChoice])
-        themes.orientation = .horizontal
-        themes.alignment = .centerY
-        themes.distribution = .fillEqually
+        let defaultRow = NSStackView(views: Array(themeChoiceButtons.prefix(3)))
+        defaultRow.orientation = .horizontal
+        defaultRow.alignment = .centerY
+        defaultRow.distribution = .fillEqually
+        defaultRow.spacing = 8
+        defaultRow.translatesAutoresizingMaskIntoConstraints = false
+        defaultRow.heightAnchor.constraint(equalToConstant: 102).isActive = true
+        let namedRow = NSStackView(views: Array(themeChoiceButtons.dropFirst(3)))
+        namedRow.orientation = .horizontal
+        namedRow.alignment = .centerY
+        namedRow.distribution = .fillEqually
+        namedRow.spacing = 8
+        namedRow.translatesAutoresizingMaskIntoConstraints = false
+        namedRow.heightAnchor.constraint(equalToConstant: 102).isActive = true
+        let themes = NSStackView(views: [defaultRow, namedRow])
+        themes.orientation = .vertical
+        themes.alignment = .leading
         themes.spacing = 8
         themes.translatesAutoresizingMaskIntoConstraints = false
-        themes.heightAnchor.constraint(equalToConstant: 102).isActive = true
         let themeCard = makeCard(padded: true)
         themeCard.stack.addArrangedSubview(themes)
         themes.widthAnchor.constraint(equalTo: themeCard.stack.widthAnchor).isActive = true
+        defaultRow.widthAnchor.constraint(equalTo: themes.widthAnchor).isActive = true
+        namedRow.widthAnchor.constraint(equalTo: themes.widthAnchor).isActive = true
         addCard(themeCard.host, to: column)
         let themeAnchor = themeCard.host
         addGroup("Network health", id: "wyvern.settings.section.network", to: column, after: themeAnchor)
@@ -609,6 +618,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             "Applies to open web tabs now.",
             to: column
         )
+        iconSection.append(to: column, pane: self)
         return column
     }
 
@@ -1744,15 +1754,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private func reloadFromStore() {
         let current = settings.settings
         applying = true
-        systemChoice.state = current.appearance == .system ? .on : .off
-        lightChoice.state = current.appearance == .light ? .on : .off
-        darkChoice.state = current.appearance == .dark ? .on : .off
-        systemChoice.refreshAccessibility()
-        lightChoice.refreshAccessibility()
-        darkChoice.refreshAccessibility()
-        systemChoice.needsDisplay = true
-        lightChoice.needsDisplay = true
-        darkChoice.needsDisplay = true
+        let selected = ThemeChoice.current(appearance: current.appearance, colorTheme: current.colorTheme)
+        for choice in themeChoiceButtons {
+            choice.state = choice.themeChoice == selected ? .on : .off
+            choice.refreshAccessibility()
+            choice.needsDisplay = true
+        }
         // On means hidden. The stored flags stay `hideWebTabs` / `hideTerminalTabs`.
         // One of web or terminal must stay visible, so turning one on disables the other.
         hideWebToggle.state = current.hideWebTabs ? .on : .off
@@ -1849,16 +1856,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     /// The clicked radio is already on. Save, then apply `NSApp.appearance` now.
     @objc private func appearancePicked(_ sender: NSButton) {
-        let preference: AppearancePreference
-        if sender === systemChoice {
-            preference = .system
-        } else if sender === lightChoice {
-            preference = .light
-        } else {
-            preference = .dark
+        guard let picked = sender as? SettingsThemeChoice else { return }
+        let choice = picked.themeChoice
+        settings.update {
+            $0.appearance = choice.appearance
+            $0.colorTheme = choice.colorTheme
         }
-        settings.update { $0.appearance = preference }
-        AppearanceController.apply(preference)
+        AppearanceController.apply(choice.appearance, colorTheme: choice.colorTheme)
         NotificationCenter.default.post(name: .wyvernSettingsDidChange, object: settings)
         reloadFromStore()
     }
@@ -2665,10 +2669,10 @@ final class SettingsSwitch: NSSwitch {
 
 @MainActor
 private final class SettingsThemeChoice: SettingsRadio {
-    let preference: AppearancePreference
+    let themeChoice: ThemeChoice
 
-    init(title: String, preference: AppearancePreference) {
-        self.preference = preference
+    init(title: String, choice: ThemeChoice) {
+        self.themeChoice = choice
         super.init(frame: .zero)
         self.title = title
         isBordered = false
@@ -2707,7 +2711,7 @@ private final class SettingsThemeChoice: SettingsRadio {
         let clip = NSBezierPath(roundedRect: thumb, xRadius: 8, yRadius: 8)
         NSGraphicsContext.saveGraphicsState()
         clip.addClip()
-        switch preference {
+        switch themeChoice {
         case .light:
             fillPreview(thumb, page: ThemeTokens.light.page, bar: ThemeTokens.light.bar1)
         case .dark:
@@ -2717,33 +2721,38 @@ private final class SettingsThemeChoice: SettingsRadio {
             let right = NSRect(x: thumb.midX, y: thumb.minY, width: thumb.width / 2, height: thumb.height)
             fillPreview(left, page: ThemeTokens.light.page, bar: ThemeTokens.light.bar1)
             fillPreview(right, page: ThemeTokens.dark.page, bar: ThemeTokens.dark.bar1)
+        case .hermes, .graphite, .paper, .nord:
+            let palette = ThemeTokens.palette(for: themeChoice, darkAppearance: themeChoice.appearance == .dark)
+            fillPreview(thumb, page: palette.page, bar: palette.bar1)
+            Theme.color(hex: palette.accent).setFill()
+            NSRect(x: thumb.minX, y: thumb.minY, width: thumb.width, height: 4).fill()
         }
-        let glyphColor: NSColor
-        let glyph: IconGlyph
-        switch preference {
-        case .light:
-            glyph = .sun
-            glyphColor = Theme.color(hex: ThemeTokens.light.text)
-        case .dark:
-            glyph = .moon
-            glyphColor = Theme.color(hex: ThemeTokens.dark.text)
+        switch themeChoice {
         case .system:
-            glyph = .sun
-            glyphColor = Theme.color(hex: ThemeTokens.light.text)
-        }
-        if preference == .system {
-            IconDrawing.stroke(glyph, in: NSRect(x: thumb.minX + 10, y: thumb.midY - 8, width: 16, height: 16), color: glyphColor)
+            IconDrawing.stroke(
+                .sun,
+                in: NSRect(x: thumb.minX + 10, y: thumb.midY - 8, width: 16, height: 16),
+                color: Theme.color(hex: ThemeTokens.light.text)
+            )
             IconDrawing.stroke(
                 .moon,
                 in: NSRect(x: thumb.maxX - 26, y: thumb.midY - 8, width: 16, height: 16),
                 color: Theme.color(hex: ThemeTokens.dark.text)
             )
-        } else {
+        case .light:
             IconDrawing.stroke(
-                glyph,
+                .sun,
                 in: NSRect(x: thumb.midX - 8, y: thumb.midY - 10, width: 16, height: 16),
-                color: glyphColor
+                color: Theme.color(hex: ThemeTokens.light.text)
             )
+        case .dark:
+            IconDrawing.stroke(
+                .moon,
+                in: NSRect(x: thumb.midX - 8, y: thumb.midY - 10, width: 16, height: 16),
+                color: Theme.color(hex: ThemeTokens.dark.text)
+            )
+        case .hermes, .graphite, .paper, .nord:
+            break
         }
         NSGraphicsContext.restoreGraphicsState()
         let ring = NSBezierPath(roundedRect: thumb.insetBy(dx: 1, dy: 1), xRadius: 8, yRadius: 8)

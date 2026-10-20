@@ -154,12 +154,18 @@ enum Theme {
 
     /// Primary-button stops. Dark mode is `#5A7BE6` over `#4C6FE0` so white text is not drawn on `#7C9CFF`.
     /// Light mode stays the accent fill with a lighter top stop.
+    /// Named palettes use their own `accentFill` with a lighter top stop.
     static func primaryButtonColors(matching appearance: NSAppearance) -> (top: NSColor, bottom: NSColor) {
         let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        if dark {
-            return (color(hex: "#5A7BE6"), color(hex: "#4C6FE0"))
+        if ThemeResolver.colorTheme == .standard {
+            if dark {
+                return (color(hex: "#5A7BE6"), color(hex: "#4C6FE0"))
+            }
+            let fill = color(hex: ThemeTokens.light.accentFill)
+            return (mixWhite(fill), fill)
         }
-        let fill = color(hex: ThemeTokens.light.accentFill)
+        let palette = ThemeTokens.palette(for: ThemeResolver.colorTheme, darkAppearance: dark)
+        let fill = color(hex: palette.accentFill)
         return (mixWhite(fill), fill)
     }
 
@@ -219,7 +225,10 @@ enum Theme {
         _ name: String,
         _ key: KeyPath<ThemeTokens.Palette, String>
     ) -> NSColor {
-        dynamic(name, ThemeTokens.light[keyPath: key], ThemeTokens.dark[keyPath: key])
+        NSColor(name: NSColor.Name(name), dynamicProvider: { appearance in
+            let palette = ThemeResolver.palette(matching: appearance)
+            return color(hex: palette[keyPath: key])
+        })
     }
 
     private static func tokenAlpha(
@@ -227,13 +236,13 @@ enum Theme {
         color: KeyPath<ThemeTokens.Palette, String>,
         alpha: KeyPath<ThemeTokens.Palette, Double>
     ) -> NSColor {
-        dynamic(
-            name,
-            ThemeTokens.light[keyPath: color],
-            ThemeTokens.dark[keyPath: color],
-            lightAlpha: CGFloat(ThemeTokens.light[keyPath: alpha]),
-            darkAlpha: CGFloat(ThemeTokens.dark[keyPath: alpha])
-        )
+        NSColor(name: NSColor.Name(name), dynamicProvider: { appearance in
+            let palette = ThemeResolver.palette(matching: appearance)
+            return self.color(
+                hex: palette[keyPath: color],
+                alpha: CGFloat(palette[keyPath: alpha])
+            )
+        })
     }
 
     private static func dynamic(
@@ -251,16 +260,57 @@ enum Theme {
     }
 }
 
+/// Current named palette. Read from `NSColor` providers, which may run off the main actor.
+enum ThemeResolver {
+    private static let lock = NSLock()
+    private static var stored: ColorTheme = .standard
+
+    static var colorTheme: ColorTheme {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+        set {
+            lock.lock()
+            stored = newValue
+            lock.unlock()
+        }
+    }
+
+    static func palette(matching appearance: NSAppearance) -> ThemeTokens.Palette {
+        let match = appearance.bestMatch(from: [.darkAqua, .aqua])
+        return ThemeTokens.palette(for: colorTheme, darkAppearance: match == .darkAqua)
+    }
+}
+
 @MainActor
 enum AppearanceController {
-    static func apply(_ preference: AppearancePreference) {
-        switch preference {
-        case .system:
+    static func apply(_ preference: AppearancePreference, colorTheme: ColorTheme? = nil) {
+        let previousTheme = ThemeResolver.colorTheme
+        let previousDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let colorTheme = colorTheme ?? previousTheme
+        ThemeResolver.colorTheme = colorTheme
+        let targetDark: Bool?
+        if colorTheme == .standard {
+            switch preference {
+            case .light: targetDark = false
+            case .dark: targetDark = true
+            case .system: targetDark = nil
+            }
+        } else {
+            targetDark = colorTheme.prefersDark
+        }
+        // Named palettes that share Light/Dark with the previous choice still need an appearance
+        // flip so `NSColor(name:dynamicProvider:)` re-resolves against the new hex tokens.
+        // Match System (nil) can also keep the same effective appearance, so it flips too.
+        if previousTheme != colorTheme, targetDark == nil || targetDark == previousDark {
+            NSApp.appearance = NSAppearance(named: previousDark ? .aqua : .darkAqua)
+        }
+        if let targetDark {
+            NSApp.appearance = NSAppearance(named: targetDark ? .darkAqua : .aqua)
+        } else {
             NSApp.appearance = nil
-        case .light:
-            NSApp.appearance = NSAppearance(named: .aqua)
-        case .dark:
-            NSApp.appearance = NSAppearance(named: .darkAqua)
         }
     }
 

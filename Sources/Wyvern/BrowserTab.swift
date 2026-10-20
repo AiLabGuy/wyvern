@@ -53,6 +53,11 @@ protocol BrowserTabHost: AnyObject {
     func browserTab(_ tab: BrowserTab, permissionChoice originKey: String, kind: SitePermissionKind) -> SitePermissionChoice
     func browserTabDidCancelMediaPrompt(_ tab: BrowserTab)
     func browserTab(_ tab: BrowserTab, hostDidChange host: String?)
+    func browserTabDidExitElementFullscreen(_ tab: BrowserTab)
+}
+
+extension BrowserTabHost {
+    func browserTabDidExitElementFullscreen(_ tab: BrowserTab) {}
 }
 
 /// One tab owns one web view. Observations are held here and invalidated on close
@@ -110,8 +115,9 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     static func makeConfiguration() -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
         // Unsolicited scripted popups stay blocked. A user gesture still reaches
-        // createWebViewWith for target=_blank and window.open.
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        // createWebViewWith for target=_blank and window.open. Element fullscreen is on,
+        // so video fullscreen buttons work (it is off by default on macOS).
+        WebContentDefaults.apply(to: configuration.preferences)
         configuration.websiteDataStore = WKWebsiteDataStore.default()
         if !hardwareAcceleration {
             applySoftwareRendering(configuration.preferences)
@@ -201,6 +207,8 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         BlockListProbe.installHandler(on: configuration.userContentController, handler: probe)
         benchHandler = handler
         probeHandler = probe
+        // Popup configurations come from WebKit. Every page web view gets the same defaults.
+        WebContentDefaults.apply(to: configuration.preferences)
         webView = WKWebView(frame: .zero, configuration: configuration)
         self.host = host
         self.surface = surface
@@ -443,6 +451,14 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         observations.append(webView.observe(\.estimatedProgress, options: [.initial, .new]) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.pullFromWebView() }
         })
+        // WebKit takes the web view into its own window for element fullscreen and puts it back
+        // on exit. The host re-pins it then, so the tile or solo layout comes back as it was.
+        observations.append(webView.observe(\.fullscreenState, options: [.new]) { [weak self] webView, _ in
+            MainActor.assumeIsolated {
+                guard let self, !self.didShutdown, webView.fullscreenState == .notInFullscreen else { return }
+                self.host?.browserTabDidExitElementFullscreen(self)
+            }
+        })
     }
 
     private func pullFromWebView() {
@@ -677,7 +693,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             return nil
         }
         // Use the configuration WebKit passed in. Do not substitute the default one.
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
+        WebContentDefaults.apply(to: configuration.preferences)
         applyAutoplay(to: configuration, url: navigationAction.request.url)
         return host?.browserTab(self, createWebViewWith: configuration)
     }

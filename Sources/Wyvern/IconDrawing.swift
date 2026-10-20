@@ -46,6 +46,8 @@ enum IconGlyph: Equatable {
     case warning
     /// DevTools pane pill. Four arrows, one toward each edge.
     case move
+    /// Toolbar Settings button. A ring with eight teeth.
+    case gear
 }
 
 enum IconDrawing {
@@ -358,6 +360,16 @@ enum IconDrawing {
             path.line(to: p(14, 8))
             path.line(to: p(12.5, 9.6))
             paint(path)
+        case .gear:
+            paint(NSBezierPath(ovalIn: svgRect(5.9, 5.9, 4.2, 4.2)))
+            paint(NSBezierPath(ovalIn: svgRect(3.4, 3.4, 9.2, 9.2)))
+            let teeth = NSBezierPath()
+            for index in 0..<8 {
+                let angle = CGFloat(index) * .pi / 4
+                teeth.move(to: p(8 + 4.6 * cos(angle), 8 + 4.6 * sin(angle)))
+                teeth.line(to: p(8 + 6.4 * cos(angle), 8 + 6.4 * sin(angle)))
+            }
+            paint(teeth)
         }
     }
 

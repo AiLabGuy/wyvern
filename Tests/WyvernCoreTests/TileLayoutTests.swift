@@ -526,6 +526,121 @@ final class TileLayoutTests: XCTestCase {
         XCTAssertEqual(layout.pruning(keeping: [a, b, c])?.tabIDs(), layout.tabIDs())
     }
 
+    func testSwappingTwoPanesExchangesOccupantsAndKeepsRatios() {
+        let splitID = UUID(uuidString: "10000000-0000-0000-0000-0000000000AA")!
+        let layout = TileLayout(
+            root: .split(TileSplit(
+                id: splitID,
+                axis: .horizontal,
+                children: [
+                    .pane(TilePane(tabID: a, kind: .web)),
+                    .pane(TilePane(tabID: b, kind: .terminal))
+                ],
+                ratios: [0.7, 0.3]
+            )),
+            focusedTabID: a
+        )
+        let swapped = layout.swapping(a, b)
+        XCTAssertEqual(swapped.tabIDs(), [b, a])
+        XCTAssertEqual(swapped.focusedTabID, a)
+        XCTAssertEqual(swapped.panes().map(\.kind), [.terminal, .web])
+        XCTAssertEqual(swapped.rootSplit?.id, splitID)
+        assertRatios(swapped.rootSplit?.ratios ?? [], [0.7, 0.3])
+        XCTAssertEqual(swapped.arrangement, .twoColumns)
+        let frames = swapped.paneFrames()
+        XCTAssertEqual(frames.map(\.tabID), [b, a])
+        XCTAssertEqual(frames[0].width, layout.paneFrames()[0].width, accuracy: 1e-12)
+        XCTAssertEqual(frames[1].width, layout.paneFrames()[1].width, accuracy: 1e-12)
+    }
+
+    func testSwappingCenterWithLeftInThreeColumns() {
+        let layout = TileLayout.arranged(.threeColumns, tabs: [a, b, c], focused: b)!
+        let swapped = layout.swapping(b, a)
+        XCTAssertEqual(swapped.tabIDs(), [b, a, c])
+        XCTAssertEqual(swapped.focusedTabID, b)
+        XCTAssertEqual(swapped.arrangement, .threeColumns)
+        assertRatios(swapped.rootSplit?.ratios ?? [], [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0])
+        let order = TileStripOrder.placingMembers(
+            session: [a, b, c],
+            focused: b,
+            membersInOrder: swapped.tabIDs()
+        )
+        XCTAssertEqual(order, [b, a, c])
+        XCTAssertEqual(TileStripGroup.memberSpan(session: order, members: Set(swapped.tabIDs())), 0...2)
+        let withOthers = TileStripOrder.placingMembers(
+            session: [d, a, b, c],
+            focused: b,
+            membersInOrder: swapped.tabIDs()
+        )
+        XCTAssertEqual(withOthers, [d, b, a, c])
+        XCTAssertEqual(TileStripGroup.memberSpan(session: withOthers, members: Set(swapped.tabIDs())), 1...3)
+    }
+
+    func testSwappingNestedOnePlusTwoKeepsShape() {
+        let layout = TileLayout.arranged(.onePlusTwo, tabs: [a, b, c], focused: a)!
+        let swapped = layout.swapping(a, c)
+        XCTAssertEqual(swapped.tabIDs(), [c, b, a])
+        XCTAssertEqual(swapped.focusedTabID, a)
+        XCTAssertEqual(swapped.arrangement, .onePlusTwo)
+        assertRatios(swapped.rootSplit?.ratios ?? [], layout.rootSplit?.ratios ?? [])
+        guard case .split(let nested) = swapped.rootSplit?.children[1] else {
+            return XCTFail("expected the stacked right column")
+        }
+        guard case .split(let original) = layout.rootSplit?.children[1] else {
+            return XCTFail("expected the original stack")
+        }
+        XCTAssertEqual(nested.id, original.id)
+        assertRatios(nested.ratios, original.ratios)
+        XCTAssertEqual(nested.children.map(\.tabID), [b, a])
+    }
+
+    func testSwappingGridAndMixedKinds() {
+        let layout = TileLayout.arranged(
+            .grid,
+            tabs: [a, b, c, d],
+            kinds: [.web, .terminal, .devtools, .web],
+            focused: a
+        )!
+        let swapped = layout.swapping(a, d)
+        XCTAssertEqual(swapped.tabIDs(), [d, b, c, a])
+        XCTAssertEqual(swapped.panes().map(\.kind), [.web, .terminal, .devtools, .web])
+        XCTAssertEqual(swapped.arrangement, .grid)
+        XCTAssertEqual(swapped.focusedTabID, a)
+
+        let mixed = TileLayout.arranged(
+            .threeColumns,
+            tabs: [a, b, c],
+            kinds: [.terminal, .devtools, .web],
+            focused: b
+        )!
+        let crossed = mixed.swapping(a, c)
+        XCTAssertEqual(crossed.tabIDs(), [c, b, a])
+        XCTAssertEqual(crossed.panes().map(\.kind), [.web, .devtools, .terminal])
+        XCTAssertEqual(crossed.focusedTabID, b)
+    }
+
+    func testSessionSnapshotAfterSwapKeepsOccupants() {
+        let layout = TileLayout.arranged(.threeColumns, tabs: [a, b, c], focused: b)!
+        let swapped = layout.swapping(b, a)
+        let ids = swapped.tabIDs()
+        let snapshot = swapped.sessionSnapshot { ids.firstIndex(of: $0) }
+        let restored = snapshot.flatMap { TileLayout.restored($0) { index in
+            ids.indices.contains(index) ? ids[index] : nil
+        } }
+        XCTAssertEqual(restored?.tabIDs(), [b, a, c])
+        XCTAssertEqual(restored?.focusedTabID, b)
+        XCTAssertEqual(restored?.arrangement, .threeColumns)
+    }
+
+    func testSwappingSelfOrMissingIdIsANoOp() {
+        let layout = TileLayout.arranged(.twoColumns, tabs: [a, b], focused: a)!
+        XCTAssertEqual(layout.swapping(a, a), layout)
+        XCTAssertEqual(layout.swapping(a, d), layout)
+        XCTAssertEqual(layout.swapping(d, a), layout)
+        XCTAssertEqual(layout.swapping(d, c), layout)
+        XCTAssertEqual(layout.exchanging(a, with: a), layout)
+    }
+
     func testNeighborSwapAndSpokenPlace() {
         let columns = TileLayout.arranged(.twoColumns, tabs: [a, b], focused: a)!
         XCTAssertEqual(columns.neighbor(of: a, toward: .right), b)

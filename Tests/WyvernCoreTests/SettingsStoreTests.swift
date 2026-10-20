@@ -24,6 +24,7 @@ final class SettingsStoreTests: XCTestCase {
         let store = SettingsStore(defaults: defaults)
         XCTAssertEqual(store.settings, .firstLaunch)
         XCTAssertEqual(store.settings.appearance, .dark)
+        XCTAssertEqual(store.settings.colorTheme, .standard)
         XCTAssertEqual(store.settings.searchEngineID, SearchEngine.duckDuckGo.id)
         XCTAssertFalse(store.settings.didChooseSearchEngine)
         XCTAssertTrue(store.settings.netHealthEnabled)
@@ -92,6 +93,13 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(AppSettings.migrateAppearance("SYSTEM"), .system)
         XCTAssertEqual(AppSettings.migrateAppearance(""), .dark)
         XCTAssertEqual(AppSettings.migrateAppearance("nope"), .dark)
+        XCTAssertEqual(AppSettings.migrateColorTheme(nil), .standard)
+        XCTAssertEqual(AppSettings.migrateColorTheme("hermes"), .hermes)
+        XCTAssertEqual(AppSettings.migrateColorTheme("GRAPHITE"), .graphite)
+        XCTAssertEqual(AppSettings.migrateColorTheme("paper"), .paper)
+        XCTAssertEqual(AppSettings.migrateColorTheme("nord"), .nord)
+        XCTAssertEqual(AppSettings.migrateColorTheme("standard"), .standard)
+        XCTAssertEqual(AppSettings.migrateColorTheme("nope"), .standard)
 
         func decode(_ json: String) throws -> AppSettings {
             try JSONDecoder().decode(AppSettings.self, from: Data(json.utf8))
@@ -100,6 +108,9 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(try decode(#"{"appearance":"dark"}"#).appearance, .dark)
         XCTAssertEqual(try decode(#"{"appearance":"light"}"#).appearance, .light)
         XCTAssertEqual(try decode(#"{}"#).appearance, .dark)
+        XCTAssertEqual(try decode(#"{}"#).colorTheme, .standard)
+        XCTAssertEqual(try decode(#"{"colorTheme":"hermes"}"#).colorTheme, .hermes)
+        XCTAssertEqual(try decode(#"{"colorTheme":"nope"}"#).colorTheme, .standard)
         XCTAssertEqual(try decode(#"{"appearance":"system"}"#).schemaVersion, AppSettings.currentSchemaVersion)
         XCTAssertTrue(try decode(#"{}"#).netHealthEnabled)
         XCTAssertTrue(try decode(#"{}"#).hardwareAcceleration)
@@ -154,6 +165,24 @@ final class SettingsStoreTests: XCTestCase {
         decoded.update { $0.tourSeen = true }
         let saved = SettingsStore(defaults: defaults)
         XCTAssertTrue(saved.settings.tourSeen)
+    }
+
+    func testColorThemePersistsAndUnknownFallsBack() throws {
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.settings.colorTheme, .standard)
+        store.update { $0.colorTheme = .hermes }
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.settings.colorTheme, .hermes)
+        XCTAssertEqual(reloaded.settings.appearance, .dark)
+        reloaded.update { settings in
+            settings.appearance = .light
+            settings.colorTheme = .paper
+        }
+        let again = SettingsStore(defaults: defaults)
+        XCTAssertEqual(again.settings.appearance, .light)
+        XCTAssertEqual(again.settings.colorTheme, .paper)
+        let encoded = try JSONEncoder().encode(again.settings)
+        XCTAssertTrue(String(decoding: encoded, as: UTF8.self).contains("\"colorTheme\":\"paper\""))
     }
 
     func testHardwareAccelerationDefaultsOnAndPersists() {

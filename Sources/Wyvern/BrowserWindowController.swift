@@ -87,6 +87,12 @@ final class WindowBarView: NSView {
         window?.performDrag(with: event)
     }
 
+    /// The 38-point strip sits under the transparent title bar. Empty chrome
+    /// drags the window only through `performDrag`, never by pass-through.
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
@@ -137,6 +143,10 @@ final class BarBackdrop: NSView {
         window?.performDrag(with: event)
     }
 
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
@@ -147,6 +157,10 @@ final class BarBackdrop: NSView {
 final class ToolbarRow: NSView {
     override func mouseDown(with event: NSEvent) {
         window?.performDrag(with: event)
+    }
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
     }
 }
 
@@ -244,6 +258,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private let reloadButton = ToolButton()
     private let addressField = AddressBarField()
     private let downloadsButton = ToolButton()
+    /// Opens Settings directly, the same as Wyvern > Settings… (Command-comma).
+    private let settingsButton = ToolButton()
     private let healthBadge = NetworkHealthBadge()
     private let healthService = NetworkHealthService()
     private var healthPopover = NSPopover()
@@ -254,6 +270,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private var backdropHeightConstraint: NSLayoutConstraint?
     private var bookmarkObserver: NSObjectProtocol?
     private var faviconObserver: NSObjectProtocol?
+    private var iconObserver: NSObjectProtocol?
     private var downloadsObserver: NSObjectProtocol?
     private var engineChooser: EngineChooserController?
     private var mediaPrompt: MediaPermissionPromptController?
@@ -333,7 +350,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         bookmarksPage = BookmarksPageView(store: bookmarks)
         newTabPage = NewTabPageView(store: bookmarks)
         super.init(window: nil)
-        let window = NSWindow(
+        let window = BrowserChromeWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1360, height: 830),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
@@ -350,6 +367,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         window.tabbingMode = .disallowed
         window.backgroundColor = Theme.win
         window.isMovableByWindowBackground = false
+        // Window full screen (green button, View menu) and page element fullscreen both need this.
+        window.collectionBehavior.insert(.fullScreenPrimary)
         let root = RootContentView()
         root.wantsLayer = true
         root.layer?.cornerRadius = MonoMetrics.windowRadius
@@ -376,6 +395,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         ) { [weak self] _ in
             Task { @MainActor in
                 self?.syncBars(progressOnly: false)
+            }
+        }
+        iconObserver = NotificationCenter.default.addObserver(
+            forName: .wyvernIconsDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.bookmarksPage.reload()
+                self.paneBookmarkPages.values.forEach { $0.reload() }
+                self.newTabPage.reload()
+                self.syncBars(progressOnly: false)
             }
         }
         faviconObserver = NotificationCenter.default.addObserver(
@@ -763,8 +795,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     /// A new press clears a cancelled drag so the next gesture is live.
+    /// The chrome window is pinned until mouse-up so AppKit cannot slide it.
     func prepareTabDrag() {
         tileDragCancelled = false
+        (window as? BrowserChromeWindow)?.beginSuppressingWindowDrag()
+    }
+
+    func endTabWindowDragSuppression() {
+        (window as? BrowserChromeWindow)?.endSuppressingWindowDrag()
     }
 
     /// Reads and clears the Esc flag. Mouse-up captures it before the drop runs on the next turn.
@@ -774,64 +812,80 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         return cancelled
     }
 
-    /// Drop of a tab drag. A strip under the pointer wins. Otherwise a release more than
-    /// `TabDrag.detachDistance` from this strip, or outside this window, detaches the tab.
-    /// The only tab in a window moves that window instead of leaving an empty one.
+    /// Drop of a tab drag. `TabDragPolicy` picks reorder, foreign strip, tile, detach, or
+    /// last-tab window move. The source window is not slid during the gesture.
     func finishTabDrag(tabID: UUID, screenPoint: NSPoint, cursorOffsetInTab: NSPoint, cancelled: Bool = false) {
         let dropped = cancelled || tileDragCancelled
         tileDragCancelled = false
         endTileDragChrome()
-        guard !dropped else { return }
-        guard let from = indexOfTab(id: tabID) else { return }
-        if pageContains(screenPoint) {
-            if let target = tileDropTarget(at: screenPoint, dragging: tabID) {
-                if tileDropCanApply(tabID: tabID, target: target) {
-                    performTileDrop(tabID: tabID, target: target)
-                }
-                // An edge that cannot tile still ends the drag. It does not detach.
-                return
-            }
-            let vertical = tabRegion.verticalDistance(toScreenPoint: screenPoint)
-            if vertical <= TabDrag.detachDistance {
-                // Near the strip, with no tile target, the drop cancels.
-                return
+        endTabWindowDragSuppression()
+        let pageHit = pageContains(screenPoint)
+        var usableTile = false
+        var unusableTile = false
+        if pageHit, let target = tileDropTarget(at: screenPoint, dragging: tabID) {
+            if tileDropCanApply(tabID: tabID, target: target) {
+                usableTile = true
+            } else {
+                unusableTile = true
             }
         }
+        var foreign: BrowserWindowController?
+        let stripHit: TabDragStripHit
         if let (target, visibleIndex) = Self.stripTarget(at: screenPoint) {
-            let destination = target.sessionIndex(forVisibleDrop: visibleIndex)
             if target === self {
-                removeFromSplitIfDroppedOutside(tabID: tabID, visibleIndex: visibleIndex)
-                moveTab(from: from, to: destination)
-            } else if let tab = detachTab(at: from) {
-                target.adopt(tab: tab, at: destination)
+                stripHit = .source(visibleIndex: visibleIndex)
+            } else {
+                stripHit = .foreign(visibleIndex: visibleIndex)
+                foreign = target
+            }
+        } else {
+            stripHit = .none
+        }
+        let query = TabDragDropQuery(
+            cancelled: dropped,
+            pageContainsPoint: pageHit,
+            hasUsableTileTarget: usableTile,
+            hasUnusableTileTarget: unusableTile,
+            verticalDistanceToSourceStrip: Double(tabRegion.verticalDistance(toScreenPoint: screenPoint)),
+            stripHit: stripHit,
+            windowContainsPoint: window?.frame.contains(screenPoint) == true,
+            tabCount: session.count,
+            sourceDropIndex: tabRegion.dropIndex(atScreenPoint: screenPoint)
+        )
+        switch TabDragPolicy.action(for: query) {
+        case .cancel:
+            return
+        case .tile:
+            if let target = tileDropTarget(at: screenPoint, dragging: tabID),
+               tileDropCanApply(tabID: tabID, target: target) {
+                performTileDrop(tabID: tabID, target: target)
+            }
+        case .reorder(let visibleIndex):
+            guard let from = indexOfTab(id: tabID) else { return }
+            removeFromSplitIfDroppedOutside(tabID: tabID, visibleIndex: visibleIndex)
+            moveTab(from: from, to: sessionIndex(forVisibleDrop: visibleIndex))
+        case .moveToForeignStrip(let visibleIndex):
+            guard let from = indexOfTab(id: tabID), let target = foreign else { return }
+            if let tab = detachTab(at: from) {
+                target.adopt(tab: tab, at: target.sessionIndex(forVisibleDrop: visibleIndex))
                 movePartnerDevTools(of: tab, to: target)
                 noteDevToolsDraggedToAnotherWindow(tab)
                 closeIfEmpty()
             }
-            return
-        }
-        let outside = window?.frame.contains(screenPoint) != true
-        let vertical = tabRegion.verticalDistance(toScreenPoint: screenPoint)
-        if outside || vertical > TabDrag.detachDistance {
-            // Hidden tabs still belong to this window. Only a truly lone tab moves it.
-            if session.count == 1 {
-                placeTabUnderCursor(
-                    tabID: tabID,
-                    dropScreenPoint: screenPoint,
-                    cursorOffsetInTab: cursorOffsetInTab
-                )
-            } else if let tab = detachTab(at: from) {
-                openWindow(adopting: tab, dropScreenPoint: screenPoint, cursorOffsetInTab: cursorOffsetInTab)
-                if case .web(let web) = tab, let home = windowHosting(tab: web.id) {
-                    movePartnerDevTools(of: tab, to: home)
-                }
-                noteDevToolsDraggedToAnotherWindow(tab)
+        case .detachToNewWindow:
+            guard let from = indexOfTab(id: tabID), let tab = detachTab(at: from) else { return }
+            openWindow(adopting: tab, dropScreenPoint: screenPoint, cursorOffsetInTab: cursorOffsetInTab)
+            if case .web(let web) = tab, let home = windowHosting(tab: web.id) {
+                movePartnerDevTools(of: tab, to: home)
             }
-            return
+            noteDevToolsDraggedToAnotherWindow(tab)
+        case .moveSourceWindow:
+            placeTabUnderCursor(
+                tabID: tabID,
+                dropScreenPoint: screenPoint,
+                cursorOffsetInTab: cursorOffsetInTab
+            )
         }
-        let visibleIndex = tabRegion.dropIndex(atScreenPoint: screenPoint)
-        removeFromSplitIfDroppedOutside(tabID: tabID, visibleIndex: visibleIndex)
-        moveTab(from: from, to: sessionIndex(forVisibleDrop: visibleIndex))
     }
 
     func tabStripDropIndex(atScreenPoint screenPoint: NSPoint) -> Int? {
@@ -839,7 +893,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         return tabRegion.dropIndex(atScreenPoint: screenPoint)
     }
 
-    /// Moves this window so the grabbed point of `tabID` sits on `dropScreenPoint`.
+    /// Drop-only: slides this window so the grabbed point of `tabID` sits on `dropScreenPoint`.
+    /// Used when the last tab is released in empty space. Not called while the pointer moves.
     func placeTabUnderCursor(tabID: UUID, dropScreenPoint: NSPoint, cursorOffsetInTab: NSPoint) {
         guard let window else { return }
         window.contentView?.layoutSubtreeIfNeeded()
@@ -1124,6 +1179,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         rememberDevToolsWindowFrameIfNeeded()
     }
 
+    /// A popped-out DevTools window remembers where it was moved, not only its size.
+    func windowDidMove(_ notification: Notification) {
+        rememberDevToolsWindowFrameIfNeeded()
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         positionTrafficLightContainers(endLayoutPass: true)
     }
@@ -1351,6 +1411,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             NotificationCenter.default.removeObserver(faviconObserver)
             self.faviconObserver = nil
         }
+        if let iconObserver {
+            NotificationCenter.default.removeObserver(iconObserver)
+            self.iconObserver = nil
+        }
         if let downloadsObserver {
             NotificationCenter.default.removeObserver(downloadsObserver)
             self.downloadsObserver = nil
@@ -1416,6 +1480,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         }
         if !progressOnly {
             noteSessionChange()
+        }
+    }
+
+    /// WebKit has put the web view back after element fullscreen. Re-run placement so the solo
+    /// container or the tile pane pins it again, and the split layout comes back as it was.
+    func browserTabDidExitElementFullscreen(_ tab: BrowserTab) {
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.window != nil else { return }
+                guard self.session.contains(where: { $0.id == tab.id }) else { return }
+                self.embedActiveSurface()
+                self.window?.contentView?.needsLayout = true
+                self.positionTrafficLightContainers(endLayoutPass: true)
+            }
         }
     }
 
@@ -1692,6 +1770,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         tiles.canvas.onDevToolsOverflow = { [weak self] id, anchor in
             self?.showDevToolsOverflow(id: id, anchor: anchor)
         }
+        tiles.canvas.onPaneDragPress = { [weak self] _ in
+            self?.prepareTabDrag()
+        }
+        tiles.canvas.onPaneDragChanged = { [weak self] id, point in
+            self?.updateTileDrag(tabID: id, screenPoint: point)
+        }
+        tiles.canvas.onPaneDragEnded = { [weak self] id, point in
+            guard let self else { return }
+            let cancelled = self.consumeTileDragCancellation()
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.finishTabDrag(
+                        tabID: id,
+                        screenPoint: point,
+                        cursorOffsetInTab: .zero,
+                        cancelled: cancelled
+                    )
+                }
+            }
+        }
         tiles.pendingMakeMain = { [weak self] id in
             guard let self else { return }
             self.activateTab(id: id, switching: false)
@@ -1782,6 +1880,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         toolbarCluster.addArrangedSubview(splitButton)
         toolbarCluster.addArrangedSubview(downloadsButton)
         toolbarCluster.addArrangedSubview(blockBadge)
+        toolbarCluster.addArrangedSubview(settingsButton)
         toolbar.addSubview(healthBadge)
         bar.addSubview(appearanceProbe)
         axBridge.translatesAutoresizingMaskIntoConstraints = false
@@ -1822,6 +1921,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         refreshAppearanceProbe()
         healthBadge.setReducedMotion(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
 
+        settingsButton.glyph = .gear
+        settingsButton.pointSize = MonoMetrics.navGlyph
+        settingsButton.tint = Theme.mute
+        settingsButton.toolTip = "Settings (⌘,)"
+        settingsButton.setAccessibilityLabel("Settings")
+        settingsButton.setAccessibilityHelp("Opens Settings")
+        settingsButton.setAccessibilityIdentifier("wyvern.toolbar.settings")
+        settingsButton.target = NSApp.delegate
+        settingsButton.action = #selector(AppDelegate.showSettings(_:))
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
         downloadsButton.glyph = .download
         downloadsButton.pointSize = MonoMetrics.navGlyph
         downloadsButton.tint = Theme.mute
@@ -1894,6 +2003,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             splitButton.widthAnchor.constraint(equalToConstant: MonoMetrics.control),
             splitButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
             downloadsButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
+            settingsButton.widthAnchor.constraint(equalToConstant: MonoMetrics.control),
+            settingsButton.heightAnchor.constraint(equalToConstant: MonoMetrics.control),
             blockBadge.heightAnchor.constraint(equalToConstant: MonoMetrics.blockBadgeHeight),
 
             toolbarCluster.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
@@ -2233,7 +2344,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
 
     private func embed(_ view: NSView, in host: NSView, insets: NSEdgeInsets = NSEdgeInsets()) {
         // Re-adding a view that is already here removes it first and flashes WKWebView.
-        if !HostedViewPlacement.shouldMove(isChildOfTarget: view.superview === host) { return }
+        if !FullscreenHostingPolicy.shouldMove(isChildOfTarget: view.superview === host, inElementFullscreen: view.isInElementFullscreen) { return }
         for subview in host.subviews {
             subview.removeFromSuperview()
         }
@@ -2251,7 +2362,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func embedActiveWebView() {
         guard let webView = activeTab?.webView else { return }
         webView.underPageBackgroundColor = Theme.page
-        if !HostedViewPlacement.shouldMove(isChildOfTarget: webView.superview === webContainer) { return }
+        let inFullscreen = webView.isInElementFullscreen
+        let isChild = webView.superview === webContainer
+        // Back from element fullscreen: WebKit put the view back. Pin it again if pins are missing.
+        if FullscreenHostingPolicy.shouldRepin(isChildOfTarget: isChild, pinnedEdges: webView.pinnedEdgeCount(in: webContainer), inElementFullscreen: inFullscreen) {
+            webView.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                webView.leadingAnchor.constraint(equalTo: webContainer.leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: webContainer.trailingAnchor),
+                webView.topAnchor.constraint(equalTo: webContainer.topAnchor),
+                webView.bottomAnchor.constraint(equalTo: webContainer.bottomAnchor)
+            ])
+            return
+        }
+        // While WebKit holds the view in its fullscreen window, the container keeps WebKit's
+        // placeholder. Removing it here would break the exit from fullscreen.
+        if !FullscreenHostingPolicy.shouldMove(isChildOfTarget: isChild, inElementFullscreen: inFullscreen) { return }
         for subview in webContainer.subviews {
             subview.removeFromSuperview()
         }
@@ -2566,12 +2692,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         case .web:
             let host = tab.displayedURL?.host ?? ""
             let source = tab.title == "New Tab" && !host.isEmpty ? host : tab.title
+            let favicon = tab.displayedURL.flatMap { url in
+                IconHostKey.normalize(url: url).flatMap { IconController.shared.image(forHost: $0) }
+            } ?? tab.favicon
             return TabStripItem(
                 id: tab.id,
                 title: tab.title,
                 badgeLetter: SiteBadge.letter(forTitle: source),
                 badgeHex: SiteBadge.colorHex(forHost: host),
-                favicon: tab.favicon,
+                favicon: favicon,
                 selected: selected,
                 groupMember: groupMember,
                 splitGlyph: splitGlyph,
@@ -3152,25 +3281,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func updateTileWindowMinSize() {
         guard let window else { return }
         let count = tiles.layout?.tabIDs().count ?? 0
+        // A popped-out DevTools window may be smaller than a browser window.
+        let devToolsOnly = isDevToolsOnlyWindow
+        let baseWidth: Double = devToolsOnly ? DevToolsWindowFrames.minimumWidth : 980
+        let minHeight = CGFloat(devToolsOnly ? DevToolsWindowFrames.minimumHeight : 640)
         let minWidth = CGFloat(TileDisplay.requiredContentMinWidth(
             paneCount: count,
             splitVisible: tiles.isSplitVisible(activeID: activeID),
-            base: 980,
+            base: baseWidth,
             paneMinWidth: Double(MonoMetrics.paneMinWidth),
             divider: Double(MonoMetrics.dividerHit)
         ))
-        if let applied = appliedTileContentMinWidth, abs(applied - minWidth) < 0.5 {
+        if let applied = appliedTileContentMinWidth, abs(applied - minWidth) < 0.5,
+           abs(window.contentMinSize.height - minHeight) < 0.5 {
             return
         }
         appliedTileContentMinWidth = minWidth
         if abs(window.contentMinSize.width - minWidth) < 0.5,
-           abs(window.minSize.width - minWidth) < 0.5 {
+           abs(window.minSize.width - minWidth) < 0.5,
+           abs(window.contentMinSize.height - minHeight) < 0.5,
+           abs(window.minSize.height - minHeight) < 0.5 {
             return
         }
-        let contentHeight = window.contentMinSize.height
-        let frameHeight = window.minSize.height
-        window.contentMinSize = NSSize(width: minWidth, height: contentHeight > 1 ? contentHeight : 640)
-        window.minSize = NSSize(width: minWidth, height: frameHeight > 1 ? frameHeight : 640)
+        window.contentMinSize = NSSize(width: minWidth, height: minHeight)
+        window.minSize = NSSize(width: minWidth, height: minHeight)
     }
 
     private func syncSplitChrome() {
@@ -3239,7 +3373,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
 
     private struct TileDropTarget {
         var anchor: UUID
-        var edge: TileEdge
+        /// Nil means swap with this pane. An edge still splits or moves.
+        var edge: TileEdge?
         var previewRect: NSRect
         var caption: String
     }
@@ -3251,7 +3386,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
             hideDropPreview()
             return
         }
-        let key = "\(tabID.uuidString)|\(target.anchor.uuidString)|\(target.edge.rawValue)"
+        let key = "\(tabID.uuidString)|\(target.anchor.uuidString)|\(target.edge?.rawValue ?? "swap")"
         pendingPreviewRect = target.previewRect
         pendingPreviewCaption = target.caption
         if key == dragPreviewKey {
@@ -3343,13 +3478,27 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         if tiles.isSplitVisible(activeID: activeID) {
             for (id, frame) in tiles.canvas.paneFrames() {
                 let inPage = tiles.canvas.convert(frame, to: pageHost)
-                if inPage.contains(local), let edge = dropEdge(in: inPage, point: local, allowTop: allowTop) {
+                guard inPage.contains(local), let zone = dropZone(in: inPage, point: local, allowTop: allowTop) else {
+                    continue
+                }
+                switch zone {
+                case .edge(let edge):
                     let caption = devToolsDropCaption(dragging: tabID, anchor: id, edge: edge)
                     return TileDropTarget(
                         anchor: id,
                         edge: edge,
                         previewRect: dropPreviewRect(in: inPage, edge: edge),
                         caption: caption
+                    )
+                case .center:
+                    // Only a member dropped on another member swaps. A non-member
+                    // on the pane center still detaches, same as an ordinary page drop.
+                    guard tiles.layout?.contains(tabID) == true else { return nil }
+                    return TileDropTarget(
+                        anchor: id,
+                        edge: nil,
+                        previewRect: inPage,
+                        caption: "Swap with \(announcementName(id: id))"
                     )
                 }
             }
@@ -3360,7 +3509,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         if tiles.hasSavedSplit {
             return nil
         }
-        guard let anchor = activeID, let edge = dropEdge(in: pageHost.bounds, point: local, allowTop: allowTop) else { return nil }
+        guard let anchor = activeID,
+              let zone = dropZone(in: pageHost.bounds, point: local, allowTop: allowTop),
+              case .edge(let edge) = zone else { return nil }
         return TileDropTarget(
             anchor: anchor,
             edge: edge,
@@ -3374,6 +3525,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     private func tileDropCanApply(tabID: UUID, target: TileDropTarget) -> Bool {
         guard let layout = tiles.layout, layout.isSplit else { return true }
         guard layout.contains(target.anchor) else { return false }
+        if target.edge == nil {
+            return tabID != target.anchor && layout.contains(tabID)
+        }
         if tabID != target.anchor, layout.contains(tabID) {
             return true
         }
@@ -3389,16 +3543,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         } else {
             incoming = tabID
         }
-        return layout.expanded(adding: incoming, beside: target.anchor, edge: target.edge) != nil
+        guard let edge = target.edge else { return false }
+        return layout.expanded(adding: incoming, beside: target.anchor, edge: edge) != nil
     }
 
-    private func dropEdge(in rect: NSRect, point: NSPoint, allowTop: Bool = false) -> TileEdge? {
-        guard rect.width > 1, rect.height > 1 else { return nil }
-        if point.x <= rect.minX + rect.width * 0.25 { return .left }
-        if point.x >= rect.maxX - rect.width * 0.25 { return .right }
-        if allowTop, point.y >= rect.maxY - rect.height * 0.25 { return .up }
-        if point.y <= rect.minY + rect.height * 0.25 { return .down }
-        return nil
+    private func dropZone(in rect: NSRect, point: NSPoint, allowTop: Bool = false) -> TileDropZone? {
+        guard rect.width > 1, rect.height > 1, rect.contains(point) else { return nil }
+        let x = Double((point.x - rect.minX) / rect.width)
+        let y = Double((point.y - rect.minY) / rect.height)
+        return TileDropClassifier.zone(x: x, y: y, allowTop: allowTop)
     }
 
     private func dropPreviewRect(in rect: NSRect, edge: TileEdge) -> NSRect {
@@ -3415,11 +3568,23 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
     }
 
     private func performTileDrop(tabID: UUID, target: TileDropTarget) {
+        if target.edge == nil {
+            let draggedName = announcementName(id: tabID)
+            let otherName = announcementName(id: target.anchor)
+            guard tiles.swap(tabID, with: target.anchor) else { return }
+            announcedPaneID = tabID
+            activateTab(id: tabID, switching: false)
+            syncBars(progressOnly: false)
+            announce("Swapped \(draggedName) with \(otherName)")
+            focusPaneContentIfNeeded()
+            return
+        }
+        guard let edge = target.edge else { return }
         if sessionKind(id: tabID) == .devtools {
             let source = devToolsTab(id: tabID)?.sourceID
             let onPage = target.anchor == source || target.anchor == tabID
             if onPage, let source {
-                let side = DevToolsSide(edge: target.edge)
+                let side = DevToolsSide(edge: edge)
                 guard tiles.placeDevTools(
                     devtools: tabID,
                     beside: source,
@@ -3435,15 +3600,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 return
             }
         }
-        let axis: TileAxis = (target.edge == .up || target.edge == .down) ? .vertical : .horizontal
+        let axis: TileAxis = (edge == .up || edge == .down) ? .vertical : .horizontal
         if tabID == target.anchor {
             if let other = recentOtherTab(besides: tabID) {
-                guard tiles.place(tabID: other, beside: tabID, edge: target.edge, kind: sessionKind(id: other)) else { return }
+                guard tiles.place(tabID: other, beside: tabID, edge: edge, kind: sessionKind(id: other)) else { return }
                 activateTab(id: tabID, switching: false)
             } else {
                 if let layout = tiles.layout, layout.isSplit {
                     guard layout.contains(tabID) else { return }
-                    guard layout.expanded(adding: UUID(), beside: tabID, edge: target.edge) != nil else { return }
+                    guard layout.expanded(adding: UUID(), beside: tabID, edge: edge) != nil else { return }
                 }
                 let previous = activeID
                 let tab = addTab(deferPresentation: true)
@@ -3458,7 +3623,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
                 return
             }
         } else {
-            guard tiles.place(tabID: tabID, beside: target.anchor, edge: target.edge, kind: sessionKind(id: tabID)) else { return }
+            guard tiles.place(tabID: tabID, beside: target.anchor, edge: edge, kind: sessionKind(id: tabID)) else { return }
             activateTab(id: tabID, switching: false)
         }
         syncBars(progressOnly: false)
@@ -4501,14 +4666,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         )
     }
 
-    private func rememberDevToolsWindowFrameIfNeeded() {
-        guard let frame = window?.frame, !session.isEmpty else { return }
-        let onlyWindowedTools = session.allSatisfy { item in
+    /// True when this window holds only DevTools tabs whose source pages live in other windows.
+    private var isDevToolsOnlyWindow: Bool {
+        guard !session.isEmpty else { return false }
+        return session.allSatisfy { item in
             guard case .devtools(let tools) = item else { return false }
             return !session.contains(where: { $0.id == tools.sourceID })
         }
-        guard onlyWindowedTools else { return }
-        AppDelegate.rememberDevToolsWindowFrame(frame)
+    }
+
+    private func rememberDevToolsWindowFrameIfNeeded() {
+        guard let frame = window?.frame, isDevToolsOnlyWindow else { return }
+        // Remembered per source tab. With several tools here, the shown one (else the first) owns the frame.
+        let tools = activeDevToolsTab() ?? session.lazy.compactMap { item -> DevToolsTab? in
+            if case .devtools(let tools) = item { return tools }
+            return nil
+        }.first
+        if let tools {
+            AppDelegate.rememberDevToolsWindowFrame(frame, source: tools.sourceID)
+        } else {
+            AppDelegate.rememberDevToolsWindowFrame(frame)
+        }
+    }
+
+    /// Re-applies the window minimum after the window's tabs change kind (DevTools pop-out: 640x420).
+    func refreshWindowMinimumSize() {
+        appliedTileContentMinWidth = nil
+        updateTileWindowMinSize()
     }
 
     private func showSourceOfActiveDevTools() {

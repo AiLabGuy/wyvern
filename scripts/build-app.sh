@@ -118,6 +118,9 @@ PY
 fi
 bash "$ROOT/scripts/gen-third-party.sh"
 cp "$ROOT/build/AppIcon.icns" "$app_path/Contents/Resources/AppIcon.icns"
+# Alternate Dock icons (Graphite, Hermes, Neon). The default AppIcon.icns is unchanged.
+mkdir -p "$app_path/Contents/Resources/IconVariants"
+cp "$ROOT/Resources/IconVariants/"*.png "$app_path/Contents/Resources/IconVariants/"
 cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/THIRD_PARTY_LICENSES.md" "$app_path/Contents/Resources/"
 
 echo "Final binary:"
