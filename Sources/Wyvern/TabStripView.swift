@@ -4,10 +4,13 @@
 import WyvernCore
 import AppKit
 
-/// Distances are in points. A click shorter than `startDistance` never becomes a drag.
-enum TabDrag {
-    static let startDistance: CGFloat = 4
-    static let detachDistance: CGFloat = 24
+/// Arranged tabs. The stack is not opaque, so the default `mouseDownCanMoveWindow`
+/// would pass a gap click (and a missed tab hit) through to the title bar.
+@MainActor
+final class TabStripStackView: NSStackView {
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
 }
 
 struct TabStripItem: Equatable {
@@ -71,7 +74,7 @@ final class TabRegionView: NSView {
     /// Right click on the new-tab button. Left click stays a new web tab.
     var onTerminalPicker: ((NSView) -> Void)?
 
-    private let stack = NSStackView()
+    private let stack = TabStripStackView()
     private let capsule = SplitGroupCapsule()
     private let links = DevToolsLinkOverlay()
     private let plus = ToolButton()
@@ -371,8 +374,13 @@ final class TabRegionView: NSView {
     }
 
     /// Only empty strip space drags the window. Tabs and buttons hit-test before this view.
+    /// `mouseDownCanMoveWindow` stays false so a miss does not also pass through to the title bar.
     override func mouseDown(with event: NSEvent) {
         window?.performDrag(with: event)
+    }
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
     }
 
     @objc private func newTabTapped() {
@@ -385,6 +393,10 @@ final class TabRegionView: NSView {
 final class TabCloseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override func shouldDelayWindowOrdering(for event: NSEvent) -> Bool {
+        false
     }
 
     override var mouseDownCanMoveWindow: Bool {
@@ -669,6 +681,10 @@ final class TabItemView: NSView {
         true
     }
 
+    override func shouldDelayWindowOrdering(for event: NSEvent) -> Bool {
+        false
+    }
+
     override var mouseDownCanMoveWindow: Bool {
         false
     }
@@ -690,7 +706,8 @@ final class TabItemView: NSView {
     /// Selects on mouse-down and returns. There is no tracking loop here: a click's mouse-up
     /// stays with this view, and the close button never enters this method (`hitTest` returns
     /// the button for points inside it). A drag starts later, from `mouseDragged`, after the
-    /// pointer moves `TabDrag.startDistance`.
+    /// pointer moves `TabDragPolicy.startDistance`. The chrome window is pinned for the
+    /// whole press so AppKit cannot slide the source window with the tab snapshot.
     override func mouseDown(with event: NSEvent) {
         dragOriginInWindow = event.locationInWindow
         dragCursorInTab = convert(event.locationInWindow, from: nil)
@@ -707,7 +724,7 @@ final class TabItemView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard dragArmed, dragOriginInWindow != nil else { return }
         let moved = max(windowTravel(of: event), pointerTravel())
-        guard moved >= TabDrag.startDistance * TabDrag.startDistance || dragWindow != nil else { return }
+        guard TabDragPolicy.dragHasStarted(travelSquared: Double(moved)) || dragWindow != nil else { return }
         let screen = dragPoint(for: event)
         if dragWindow == nil {
             showDragImage(at: screen)
@@ -724,7 +741,7 @@ final class TabItemView: NSView {
         let started = dragWindow != nil
         // A HID drag can deliver mouse-up with the cursor already past the strip and
         // never deliver mouseDragged. The distance from mouse-down is the same threshold.
-        let crossed = travelled >= TabDrag.startDistance * TabDrag.startDistance
+        let crossed = TabDragPolicy.dragHasStarted(travelSquared: Double(travelled))
         let imageWindow = dragWindow
         let offset = dragCursorInTab
         let id = tabID
@@ -738,6 +755,7 @@ final class TabItemView: NSView {
         // Move the tab on the next turn: this view must still be in the strip while the
         // click or drag's mouse-up is delivered, and the close button is a different view.
         imageWindow?.orderOut(nil)
+        controller?.endTabWindowDragSuppression()
         guard (started || crossed), let controller else { return }
         DispatchQueue.main.async { [weak controller] in
             MainActor.assumeIsolated {

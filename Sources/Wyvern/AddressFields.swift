@@ -338,6 +338,17 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     /// Return ends editing inside `onSubmit`. That callback must not rewrite `stringValue` before the typed text is submitted.
     private var suppressRestore = false
     private let placeholder = "Search or enter address"
+    /// The address text font in every state (see `AddressTypography`). Return must not change it.
+    static let addressFont: NSFont = {
+        let spec = AddressTypography.text
+        let weight = NSFont.Weight(rawValue: CGFloat(spec.weight))
+        switch spec.design {
+        case .monospaced:
+            return Theme.mono(size: CGFloat(spec.size), weight: weight)
+        case .system:
+            return Theme.font(size: CGFloat(spec.size), weight: weight)
+        }
+    }()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -354,7 +365,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         textField.isBordered = false
         textField.drawsBackground = false
         textField.focusRingType = .none
-        textField.font = Theme.font(size: 13)
+        textField.font = Self.addressFont
         textField.textColor = Theme.text
         textField.usesSingleLineMode = true
         textField.lineBreakMode = .byTruncatingTail
@@ -485,7 +496,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         star.tint = bookmarked ? Theme.accent : Theme.mute
         star.setAccessibilityLabel(bookmarked ? "Remove Bookmark" : "Add Bookmark")
         let raw = url?.absoluteString ?? ""
-        setIdleFont(Theme.mono(size: 12))
+        setIdleFont(Self.addressFont)
         setIdleColor(Theme.mute)
         setIdleString(raw)
         textField.idleAccessibilityValue = raw.isEmpty ? nil : raw
@@ -588,24 +599,14 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     /// Plain full URL in the normal text color. The cell is updated only before the editor exists.
     /// Assigning `stringValue` while the editor is up can end the edit that just started.
     private func showPlainEditingText() {
-        let plain: String?
-        if let url = pageURL {
-            let font = Theme.mono(size: 12)
-            textField.font = font
-            if let cell = textField.cell as? NSTextFieldCell {
-                cell.font = font
-            }
-            textField.textColor = Theme.text
-            plain = url.absoluteString
-        } else {
-            let font = Theme.font(size: 13)
-            textField.font = font
-            if let cell = textField.cell as? NSTextFieldCell {
-                cell.font = font
-            }
-            textField.textColor = Theme.text
-            plain = nil
+        // One font for typing and for the committed URL, with or without a page URL.
+        let font = Self.addressFont
+        textField.font = font
+        if let cell = textField.cell as? NSTextFieldCell {
+            cell.font = font
         }
+        textField.textColor = Theme.text
+        let plain: String? = pageURL?.absoluteString
         if textField.currentEditor() == nil, let plain, textField.stringValue != plain {
             textField.stringValue = plain
         }
@@ -625,7 +626,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
             cell.applyEditorTypography(view)
             cell.centerEditor(view, boundsHeight: textField.bounds.height)
         } else {
-            let font = textField.font ?? Theme.mono(size: 12)
+            let font = textField.font ?? Self.addressFont
             view.font = font
             view.textColor = Theme.text
             view.insertionPointColor = Theme.text
@@ -661,13 +662,13 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
             return
         }
         if let url = pageURL {
-            let font = Theme.mono(size: 12)
+            let font = Self.addressFont
             setIdleFont(font)
             setIdleColor(Theme.text)
             textField.idleAccessibilityValue = url.absoluteString
             setIdleAttributed(Self.attributed(url, font: font))
         } else {
-            setIdleFont(Theme.font(size: 13))
+            setIdleFont(Self.addressFont)
             setIdleColor(Theme.text)
             textField.idleAccessibilityValue = nil
             setIdleString("")

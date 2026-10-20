@@ -38,7 +38,8 @@ final class NewTabPageView: NSView {
             let tile = SiteTile(
                 title: bookmark.title,
                 letter: SiteBadge.letter(forTitle: bookmark.title),
-                hex: SiteBadge.colorHex(forHost: AddressFormatting.host(of: bookmark.url))
+                hex: SiteBadge.colorHex(forHost: AddressFormatting.host(of: bookmark.url)),
+                icon: IconController.shared.image(forBookmark: bookmark.id)
             )
             tile.onOpen = { [weak self] in self?.onOpen?(bookmark) }
             tile.translatesAutoresizingMaskIntoConstraints = false
@@ -120,7 +121,7 @@ final class NewTabPageView: NSView {
 final class SiteTile: NSControl {
     var onOpen: (() -> Void)?
 
-    init(title: String, letter: String, hex: String) {
+    init(title: String, letter: String, hex: String, icon: NSImage? = nil) {
         super.init(frame: .zero)
         let box = TilePlate()
         box.translatesAutoresizingMaskIntoConstraints = false
@@ -130,6 +131,15 @@ final class SiteTile: NSControl {
         badge.cornerRadius = MonoMetrics.tileBadgeRadius
         badge.fontSize = MonoMetrics.tileBadgeFont
         badge.translatesAutoresizingMaskIntoConstraints = false
+        badge.isHidden = icon != nil
+        let iconView = NSImageView()
+        iconView.image = icon
+        iconView.isHidden = icon == nil
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.wantsLayer = true
+        iconView.layer?.cornerRadius = MonoMetrics.tileBadgeRadius
+        iconView.layer?.masksToBounds = true
+        iconView.translatesAutoresizingMaskIntoConstraints = false
         let label = NSTextField(labelWithString: title)
         label.font = Theme.font(size: 12)
         label.textColor = Theme.mute
@@ -139,6 +149,7 @@ final class SiteTile: NSControl {
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(box)
         box.addSubview(badge)
+        box.addSubview(iconView)
         addSubview(label)
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: MonoMetrics.tileWidth),
@@ -150,6 +161,10 @@ final class SiteTile: NSControl {
             badge.centerYAnchor.constraint(equalTo: box.centerYAnchor),
             badge.widthAnchor.constraint(equalToConstant: MonoMetrics.tileBadge),
             badge.heightAnchor.constraint(equalToConstant: MonoMetrics.tileBadge),
+            iconView.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            iconView.widthAnchor.constraint(equalTo: badge.widthAnchor),
+            iconView.heightAnchor.constraint(equalTo: badge.heightAnchor),
             label.topAnchor.constraint(equalTo: box.bottomAnchor, constant: 8),
             label.leadingAnchor.constraint(equalTo: leadingAnchor),
             label.trailingAnchor.constraint(equalTo: trailingAnchor),

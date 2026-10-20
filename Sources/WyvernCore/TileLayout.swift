@@ -210,7 +210,7 @@ public struct TileLayout: Equatable, Sendable {
               order[anchorIndex + 1] == tabID else {
             return moved
         }
-        return moved.exchanging(tabID, with: anchorTabID)
+        return moved.swapping(tabID, anchorTabID)
     }
 
     /// Detaches `tabID` and places it just after `anchorTabID` along `axis`.
@@ -442,20 +442,27 @@ public struct TileLayout: Equatable, Sendable {
         return TileLayout(root: node, focusedTabID: focusedTabID)
     }
 
-    /// Exchanges two panes' tabs and kinds. Focus stays on the same tab, which moves with it.
-    public func exchanging(_ first: UUID, with second: UUID) -> TileLayout {
-        guard first != second, contains(first), contains(second) else { return self }
+    /// Exchanges two panes' occupants. Tree shape, split ids, and ratios stay put.
+    /// Focus stays on the same tab, which moves with it.
+    /// The same id twice, or an id that is not in the tree, leaves the layout unchanged.
+    public func swapping(_ a: UUID, _ b: UUID) -> TileLayout {
+        guard a != b, contains(a), contains(b) else { return self }
         let records = panes()
-        guard let paneA = records.first(where: { $0.tabID == first }),
-              let paneB = records.first(where: { $0.tabID == second }) else {
+        guard let paneA = records.first(where: { $0.tabID == a }),
+              let paneB = records.first(where: { $0.tabID == b }) else {
             return self
         }
         let node = Self.mapPanes(root) { pane in
-            if pane.tabID == first { return TilePane(tabID: second, kind: paneB.kind) }
-            if pane.tabID == second { return TilePane(tabID: first, kind: paneA.kind) }
+            if pane.tabID == a { return paneB }
+            if pane.tabID == b { return paneA }
             return pane
         }
         return TileLayout(root: node, focusedTabID: focusedTabID)
+    }
+
+    /// Exchanges two panes' tabs and kinds. Focus stays on the same tab, which moves with it.
+    public func exchanging(_ first: UUID, with second: UUID) -> TileLayout {
+        swapping(first, second)
     }
 
     /// Snaps `fraction` (0...1 along the split) to 1/3, 1/2, 2/3, and any extra targets, within `tolerance` points.

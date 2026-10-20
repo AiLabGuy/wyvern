@@ -16,3 +16,7 @@ only in the human edits.
 
 Files: wyvern-icon.svg (master), wyvern-icon-small.svg (16–32 px master) and PNG renders
 at 16, 32, 64, 128, 256, 512 and 1024 px. The full license text is in LICENSES/CC-BY-4.0.txt.
+
+`scripts/make-icon-variants.py` derives three 512 px alternates from `wyvern-icon-1024.png`
+(Graphite, Hermes, Neon) into `Resources/IconVariants/`. The master files in this folder
+are not modified. Each alternate has a `.license` sidecar with the same CC-BY-4.0 terms.

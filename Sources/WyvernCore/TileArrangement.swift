@@ -412,7 +412,7 @@ extension TileLayout {
     public func swapping(toward edge: TileEdge) -> TileLayout {
         guard edge == .left || edge == .right else { return self }
         guard let other = neighbor(of: focusedTabID, toward: edge) else { return self }
-        return exchanging(focusedTabID, with: other)
+        return swapping(focusedTabID, other)
     }
 
     /// Spoken place for VoiceOver, for example "right pane" or "bottom left pane".

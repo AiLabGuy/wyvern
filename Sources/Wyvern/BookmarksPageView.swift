@@ -248,7 +248,11 @@ final class BookmarksPageView: NSView, NSTableViewDataSource, NSTableViewDelegat
             }
             isFirstVisibleGroup = false
             for bookmark in items {
-                let row = BookmarkSidebarRow(bookmark: bookmark, selected: bookmark.id == selectedID)
+                let row = BookmarkSidebarRow(
+                    bookmark: bookmark,
+                    selected: bookmark.id == selectedID,
+                    icon: IconController.shared.image(forBookmark: bookmark.id)
+                )
                 row.onOpen = { [weak self] in
                     self?.selectedID = bookmark.id
                     self?.onOpen?(bookmark)
@@ -306,7 +310,7 @@ final class BookmarksPageView: NSView, NSTableViewDataSource, NSTableViewDelegat
         switch column.identifier {
         case BookmarkColumn.name:
             let cell = reused(BookmarkNameCell.self, id: column.identifier, in: tableView)
-            cell.configure(title: bookmark.title)
+            cell.configure(title: bookmark.title, icon: IconController.shared.image(forBookmark: bookmark.id))
             return cell
         case BookmarkColumn.address:
             let cell = reused(BookmarkTextCell.self, id: column.identifier, in: tableView)
@@ -396,6 +400,17 @@ final class BookmarksPageView: NSView, NSTableViewDataSource, NSTableViewDelegat
         }
         move.submenu = submenu
         menu.addItem(move)
+
+        menu.addItem(.separator())
+        let setIcon = NSMenuItem(title: "Set Icon…", action: #selector(setBookmarkIcon(_:)), keyEquivalent: "")
+        setIcon.target = self
+        setIcon.representedObject = bookmark.id.uuidString
+        menu.addItem(setIcon)
+        let resetIcon = NSMenuItem(title: "Reset Icon", action: #selector(resetBookmarkIcon(_:)), keyEquivalent: "")
+        resetIcon.target = self
+        resetIcon.representedObject = bookmark.id.uuidString
+        resetIcon.isEnabled = IconController.shared.hasBookmarkIcon(id: bookmark.id)
+        menu.addItem(resetIcon)
     }
 
     private func moveItem(title: String, bookmark: Bookmark, folder: String?) -> NSMenuItem {
@@ -425,6 +440,34 @@ final class BookmarksPageView: NSView, NSTableViewDataSource, NSTableViewDelegat
     @objc private func removeBookmark(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
         store.remove(id: id)
+        reload()
+    }
+
+    @objc private func setBookmarkIcon(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        IconPickPanel.choose(from: window) { [weak self] url in
+            Task { @MainActor in
+                guard let self, let url else { return }
+                if let error = IconController.shared.installBookmarkIcon(id: id, from: url) {
+                    let alert = NSAlert()
+                    alert.messageText = "That image can't be used"
+                    alert.informativeText = IconController.message(for: error)
+                    alert.addButton(withTitle: "OK")
+                    if let window = self.window {
+                        alert.beginSheetModal(for: window)
+                    } else {
+                        alert.runModal()
+                    }
+                    return
+                }
+                self.reload()
+            }
+        }
+    }
+
+    @objc private func resetBookmarkIcon(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        IconController.shared.resetBookmarkIcon(id: id)
         reload()
     }
 
@@ -498,9 +541,10 @@ final class BookmarkSidebarRow: NSView {
     var onMenu: (() -> NSMenu)?
     private let selected: Bool
     private let badge = LetterBadgeView()
+    private let iconView = NSImageView()
     private let titleField = NSTextField(labelWithString: "")
 
-    init(bookmark: Bookmark, selected: Bool) {
+    init(bookmark: Bookmark, selected: Bool, icon: NSImage? = nil) {
         self.selected = selected
         super.init(frame: .zero)
         badge.letter = SiteBadge.letter(forTitle: bookmark.title)
@@ -508,6 +552,14 @@ final class BookmarkSidebarRow: NSView {
         badge.cornerRadius = MonoMetrics.faviconRadius
         badge.fontSize = 9
         badge.translatesAutoresizingMaskIntoConstraints = false
+        badge.isHidden = icon != nil
+        iconView.image = icon
+        iconView.isHidden = icon == nil
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.wantsLayer = true
+        iconView.layer?.cornerRadius = MonoMetrics.faviconRadius
+        iconView.layer?.masksToBounds = true
+        iconView.translatesAutoresizingMaskIntoConstraints = false
         titleField.stringValue = bookmark.title
         titleField.font = Theme.font(size: 12.5)
         titleField.textColor = Theme.text
@@ -515,6 +567,7 @@ final class BookmarkSidebarRow: NSView {
         titleField.maximumNumberOfLines = 1
         titleField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badge)
+        addSubview(iconView)
         addSubview(titleField)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 24),
@@ -522,6 +575,10 @@ final class BookmarkSidebarRow: NSView {
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.widthAnchor.constraint(equalToConstant: MonoMetrics.favicon),
             badge.heightAnchor.constraint(equalToConstant: MonoMetrics.favicon),
+            iconView.leadingAnchor.constraint(equalTo: badge.leadingAnchor),
+            iconView.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            iconView.widthAnchor.constraint(equalTo: badge.widthAnchor),
+            iconView.heightAnchor.constraint(equalTo: badge.heightAnchor),
             titleField.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 8),
             titleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleField.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -554,6 +611,7 @@ final class BookmarkSidebarRow: NSView {
 @MainActor
 final class BookmarkNameCell: NSTableCellView {
     private let badge = LetterBadgeView()
+    private let iconView = NSImageView()
     private let label = NSTextField(labelWithString: "")
 
     override init(frame frameRect: NSRect) {
@@ -562,17 +620,28 @@ final class BookmarkNameCell: NSTableCellView {
         badge.fontSize = 9
         badge.hex = SiteBadge.listHex
         badge.translatesAutoresizingMaskIntoConstraints = false
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.wantsLayer = true
+        iconView.layer?.cornerRadius = MonoMetrics.faviconRadius
+        iconView.layer?.masksToBounds = true
+        iconView.isHidden = true
+        iconView.translatesAutoresizingMaskIntoConstraints = false
         label.font = Theme.font(size: 13)
         label.textColor = Theme.text
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(badge)
+        addSubview(iconView)
         addSubview(label)
         NSLayoutConstraint.activate([
             badge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.widthAnchor.constraint(equalToConstant: MonoMetrics.favicon),
             badge.heightAnchor.constraint(equalToConstant: MonoMetrics.favicon),
+            iconView.leadingAnchor.constraint(equalTo: badge.leadingAnchor),
+            iconView.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+            iconView.widthAnchor.constraint(equalTo: badge.widthAnchor),
+            iconView.heightAnchor.constraint(equalTo: badge.heightAnchor),
             label.leadingAnchor.constraint(equalTo: badge.trailingAnchor, constant: 8),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
             label.centerYAnchor.constraint(equalTo: centerYAnchor)
@@ -584,8 +653,11 @@ final class BookmarkNameCell: NSTableCellView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func configure(title: String) {
+    func configure(title: String, icon: NSImage? = nil) {
         badge.letter = SiteBadge.letter(forTitle: title)
+        badge.isHidden = icon != nil
+        iconView.image = icon
+        iconView.isHidden = icon == nil
         label.stringValue = title
         label.textColor = Theme.text
     }

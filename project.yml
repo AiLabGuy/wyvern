@@ -71,6 +71,8 @@ targets:
           mkdir -p "${dest}"
           cp "${SRCROOT}/LICENSE" "${SRCROOT}/NOTICE" "${SRCROOT}/THIRD_PARTY_LICENSES.md" "${dest}/"
           cp "${SRCROOT}/build/AppIcon.icns" "${dest}/AppIcon.icns"
+          mkdir -p "${dest}/IconVariants"
+          cp "${SRCROOT}/Resources/IconVariants/"*.png "${dest}/IconVariants/"
   WyvernCoreTests:
     type: bundle.unit-test
     platform: macOS

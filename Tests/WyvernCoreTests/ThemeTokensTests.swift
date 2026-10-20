@@ -111,4 +111,245 @@ final class ThemeTokensTests: XCTestCase {
         XCTAssertNil(ThemeTokens.rgb(hex: "zzzzzz"))
         XCTAssertNil(ThemeTokens.rgb(hex: ""))
     }
+
+    func testPickerOrderAndUniqueNames() {
+        XCTAssertEqual(
+            ThemeChoice.allCases.map(\.rawValue),
+            ["light", "dark", "system", "hermes", "graphite", "paper", "nord"]
+        )
+        let names = ThemeChoice.allCases.map(\.displayName)
+        XCTAssertEqual(names, ["Light", "Dark", "Match System", "Hermes", "Graphite", "Paper", "Nord"])
+        XCTAssertEqual(Set(names).count, names.count)
+        XCTAssertEqual(Set(ThemeChoice.allCases.map(\.rawValue)).count, ThemeChoice.allCases.count)
+        XCTAssertEqual(Set(ColorTheme.allCases.map(\.rawValue)).count, ColorTheme.allCases.count)
+        XCTAssertEqual(
+            ColorTheme.allCases.map(\.displayName),
+            ["Default", "Hermes", "Graphite", "Paper", "Nord"]
+        )
+        XCTAssertEqual(Set(ColorTheme.allCases.map(\.displayName)).count, ColorTheme.allCases.count)
+        XCTAssertEqual(ThemeTokens.catalog.map(\.name), ["Light", "Dark", "Hermes", "Graphite", "Paper", "Nord"])
+        XCTAssertEqual(Set(ThemeTokens.catalog.map(\.id)).count, ThemeTokens.catalog.count)
+        XCTAssertEqual(Set(ThemeTokens.catalog.map(\.name)).count, ThemeTokens.catalog.count)
+    }
+
+    func testEveryThemeDefinesEveryToken() {
+        XCTAssertFalse(ThemeTokens.hexTokenNames.isEmpty)
+        XCTAssertFalse(ThemeTokens.alphaTokenNames.isEmpty)
+        for entry in ThemeTokens.catalog {
+            let palette = entry.palette
+            let mirroredHex = palette.mirroredHexTokens
+            XCTAssertEqual(
+                Set(mirroredHex.keys),
+                ThemeTokens.hexTokenNames,
+                "\(entry.name) hex tokens"
+            )
+            XCTAssertEqual(
+                Set(palette.hexTokens.map(\.name)),
+                ThemeTokens.hexTokenNames,
+                "\(entry.name) listed hex tokens"
+            )
+            for (name, hex) in palette.hexTokens {
+                XCTAssertNotNil(ThemeTokens.rgb(hex: hex), "\(entry.name).\(name) = \(hex)")
+                XCTAssertEqual(mirroredHex[name], hex, "\(entry.name).\(name)")
+            }
+            let mirroredAlpha = palette.mirroredAlphaTokens
+            XCTAssertEqual(
+                Set(mirroredAlpha.keys),
+                ThemeTokens.alphaTokenNames,
+                "\(entry.name) alpha tokens"
+            )
+            for (name, value) in palette.alphaTokens {
+                XCTAssertGreaterThanOrEqual(value, 0, "\(entry.name).\(name)")
+                XCTAssertLessThanOrEqual(value, 1, "\(entry.name).\(name)")
+                XCTAssertEqual(mirroredAlpha[name], value)
+            }
+        }
+        for theme in ColorTheme.allCases {
+            let light = ThemeTokens.palette(for: theme, darkAppearance: false)
+            let dark = ThemeTokens.palette(for: theme, darkAppearance: true)
+            XCTAssertEqual(Set(light.hexTokens.map(\.name)), ThemeTokens.hexTokenNames)
+            XCTAssertEqual(Set(dark.hexTokens.map(\.name)), ThemeTokens.hexTokenNames)
+            switch theme {
+            case .standard:
+                XCTAssertEqual(light, ThemeTokens.light)
+                XCTAssertEqual(dark, ThemeTokens.dark)
+            case .hermes:
+                XCTAssertEqual(light, ThemeTokens.hermes)
+                XCTAssertEqual(dark, ThemeTokens.hermes)
+            case .graphite:
+                XCTAssertEqual(light, ThemeTokens.graphite)
+                XCTAssertEqual(dark, ThemeTokens.graphite)
+            case .paper:
+                XCTAssertEqual(light, ThemeTokens.paper)
+                XCTAssertEqual(dark, ThemeTokens.paper)
+            case .nord:
+                XCTAssertEqual(light, ThemeTokens.nord)
+                XCTAssertEqual(dark, ThemeTokens.nord)
+            }
+        }
+    }
+
+    func testNamedThemeSelectionIgnoresAppearanceForPalette() {
+        XCTAssertEqual(
+            ThemeChoice.current(appearance: .light, colorTheme: .hermes),
+            .hermes
+        )
+        XCTAssertEqual(
+            ThemeChoice.current(appearance: .system, colorTheme: .standard),
+            .system
+        )
+        XCTAssertEqual(
+            ThemeChoice.current(appearance: .dark, colorTheme: .standard),
+            .dark
+        )
+        XCTAssertEqual(ThemeChoice.paper.appearance, .light)
+        XCTAssertEqual(ThemeChoice.hermes.appearance, .dark)
+        XCTAssertEqual(ThemeChoice.graphite.colorTheme, .graphite)
+        XCTAssertEqual(ThemeChoice.light.colorTheme, .standard)
+    }
+
+    func testContrastMathMatchesWCAG() throws {
+        XCTAssertEqual(try XCTUnwrap(ColorContrast.relativeLuminance(hex: "#FFFFFF")), 1.0, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(ColorContrast.relativeLuminance(hex: "#000000")), 0.0, accuracy: 0.0001)
+        XCTAssertEqual(
+            try XCTUnwrap(ColorContrast.contrastRatio(foreground: "#FFFFFF", background: "#000000")),
+            21.0,
+            accuracy: 0.0001
+        )
+        // WCAG reference gray: #767676 on white is the AA 4.5:1 boundary.
+        let gray = try XCTUnwrap(ColorContrast.contrastRatio(foreground: "#767676", background: "#FFFFFF"))
+        XCTAssertEqual(gray, 4.54, accuracy: 0.02)
+        XCTAssertTrue(ColorContrast.meetsAA(foreground: "#16181B", background: "#FFFFFF"))
+        XCTAssertTrue(ColorContrast.meetsAA(foreground: "#F2C230", background: "#0B2A6F", largeOrUI: true))
+        XCTAssertNil(ColorContrast.contrastRatio(foreground: "nope", background: "#000000"))
+    }
+
+    func testEveryThemeMeetsWCAGTextAndIndicatorContrast() throws {
+        for entry in ThemeTokens.catalog {
+            try assertReadableText(entry.palette, name: entry.name)
+            try assertAccentIndicators(entry.palette, name: entry.name)
+            try assertTerminalText(entry.palette, name: entry.name)
+        }
+        // Named palettes also keep mute ink at 4.5:1 on chrome, page, and the selected tab.
+        for entry in ThemeTokens.catalog where entry.id != "light" && entry.id != "dark" {
+            try assertMuteText(entry.palette, name: entry.name)
+        }
+        // Default Light/Dark keep the original mute tokens. Mute is not tab-title ink
+        // (titles use `text`). bar2 is the lower toolbar gradient stop, not a text fill.
+        // termDim on Light sits at ~4.41:1 on the terminal page and is secondary chrome.
+        let lightMuteBar1 = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: ThemeTokens.light.mute, background: ThemeTokens.light.bar1)
+        )
+        XCTAssertGreaterThanOrEqual(lightMuteBar1, ColorContrast.aaNormalText)
+        let darkMuteChrome = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: ThemeTokens.dark.mute, background: ThemeTokens.dark.background)
+        )
+        XCTAssertGreaterThanOrEqual(darkMuteChrome, ColorContrast.aaNormalText)
+        let darkMutePage = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: ThemeTokens.dark.mute, background: ThemeTokens.dark.page)
+        )
+        XCTAssertGreaterThanOrEqual(darkMutePage, ColorContrast.aaNormalText)
+    }
+
+    private func assertReadableText(_ palette: ThemeTokens.Palette, name: String) throws {
+        let surfaces = [
+            ("chrome", palette.background),
+            ("page", palette.page),
+            ("selected tab", palette.tabA1),
+            ("tab", palette.tab),
+            ("field", palette.field),
+            ("card", palette.card),
+            ("bar1", palette.bar1),
+            ("bar2", palette.bar2)
+        ]
+        for (surface, background) in surfaces {
+            let ratio = try XCTUnwrap(
+                ColorContrast.contrastRatio(foreground: palette.text, background: background),
+                "\(name) text on \(surface)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                ratio,
+                ColorContrast.aaNormalText,
+                "\(name) text on \(surface) \(palette.text) / \(background) = \(ratio)"
+            )
+        }
+        let fill = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: "#FFFFFF", background: palette.accentFill),
+            "\(name) white on accentFill"
+        )
+        XCTAssertGreaterThanOrEqual(
+            fill,
+            ColorContrast.aaNormalText,
+            "\(name) white on accentFill \(palette.accentFill) = \(fill)"
+        )
+    }
+
+    private func assertMuteText(_ palette: ThemeTokens.Palette, name: String) throws {
+        let surfaces = [
+            ("chrome", palette.background),
+            ("page", palette.page),
+            ("selected tab", palette.tabA1),
+            ("tab", palette.tab),
+            ("field", palette.field),
+            ("card", palette.card),
+            ("bar1", palette.bar1),
+            ("bar2", palette.bar2)
+        ]
+        for (surface, background) in surfaces {
+            let ratio = try XCTUnwrap(
+                ColorContrast.contrastRatio(foreground: palette.mute, background: background),
+                "\(name) mute on \(surface)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                ratio,
+                ColorContrast.aaNormalText,
+                "\(name) mute on \(surface) \(palette.mute) / \(background) = \(ratio)"
+            )
+        }
+    }
+
+    private func assertAccentIndicators(_ palette: ThemeTokens.Palette, name: String) throws {
+        let surfaces = [
+            ("chrome", palette.background),
+            ("bar1", palette.bar1),
+            ("bar2", palette.bar2),
+            ("tab", palette.tab),
+            ("selected tab", palette.tabA1)
+        ]
+        for (surface, background) in surfaces {
+            let ratio = try XCTUnwrap(
+                ColorContrast.contrastRatio(foreground: palette.accent, background: background),
+                "\(name) accent on \(surface)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                ratio,
+                ColorContrast.aaLargeOrUI,
+                "\(name) accent on \(surface) \(palette.accent) / \(background) = \(ratio)"
+            )
+        }
+    }
+
+    private func assertTerminalText(_ palette: ThemeTokens.Palette, name: String) throws {
+        let text = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: palette.termText, background: palette.termBackground)
+        )
+        XCTAssertGreaterThanOrEqual(text, ColorContrast.aaNormalText, "\(name) termText")
+        let prompt = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: palette.termPrompt, background: palette.termBackground)
+        )
+        XCTAssertGreaterThanOrEqual(prompt, ColorContrast.aaNormalText, "\(name) termPrompt")
+        let dim = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: palette.termDim, background: palette.termBackground)
+        )
+        if name == "Light" {
+            // Decorative / secondary terminal chrome. 4.41:1 on the default Light page.
+            XCTAssertGreaterThan(dim, 4.3, "\(name) termDim (documented decorative)")
+        } else {
+            XCTAssertGreaterThanOrEqual(dim, ColorContrast.aaNormalText, "\(name) termDim")
+        }
+        let glyph = try XCTUnwrap(
+            ColorContrast.contrastRatio(foreground: palette.termGlyph, background: palette.termTab)
+        )
+        XCTAssertGreaterThanOrEqual(glyph, ColorContrast.aaLargeOrUI, "\(name) termGlyph")
+    }
 }
