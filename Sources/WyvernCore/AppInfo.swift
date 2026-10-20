@@ -14,7 +14,7 @@ public enum AppInfo {
     public static let shortName = "Wyvern"
     public static let productName = "Wyvern Browser"
     public static let fallbackBundleIdentifier = "com.example.wyvern"
-    public static let legacyBundleIdentifier = "org.placeholder.wyvern"
+    public static let legacyBundleIdentifier = "com.example.wyvern.legacy"
     public static let legacyProductFolderName = "WyvernLegacy"
     public static let copyrightNotice = "Copyright 2026 Wyvern Contributors"
     public static let marketingVersion = "0.1.0"

@@ -12,5 +12,4 @@ regexTarget = "line"
 regexes = [
   '''^\s*let privateKey: Curve25519\.Signing\.PrivateKey\s*$''',
   '''^\s*keyID: "ABCDEF0123456789",\s*$''',
-  '''^\s*public static let defaultsMigrationMarkerKey = "legacy.data.migrated"\s*$''',
 ]
