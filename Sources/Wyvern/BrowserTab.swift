@@ -117,9 +117,14 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         preconditionFailure("about:blank must be a valid URL")
     }()
 
-    /// Do not set `customUserAgent` or `applicationNameForUserAgent`. The system default stays.
+    /// User agent: `applicationNameForUserAgent` is Safari's own `Version/<x.y> Safari/605.1.15`
+    /// (`SafariUserAgent`), read from the installed Safari. Without it Google and other sites treat
+    /// the bare WKWebView agent as an old browser and serve legacy pages. Do not set
+    /// `customUserAgent`, and do not add an app token: the agent must stay identical to Safari's
+    /// so Wyvern does not publish anything a page could fingerprint or rely on.
     static func makeConfiguration() -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        SafariUserAgent.apply(to: configuration)
         // Unsolicited scripted popups stay blocked. A user gesture still reaches
         // createWebViewWith for target=_blank and window.open. Element fullscreen is on,
         // so video fullscreen buttons work (it is off by default on macOS).
@@ -215,8 +220,10 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         BlockListProbe.installHandler(on: configuration.userContentController, handler: probe)
         benchHandler = handler
         probeHandler = probe
-        // Popup configurations come from WebKit. Every page web view gets the same defaults.
+        // Popup configurations come from WebKit. Every page web view gets the same defaults,
+        // including the Safari application name (popups, tiles, and restored tabs all pass here).
         WebContentDefaults.apply(to: configuration.preferences)
+        SafariUserAgent.apply(to: configuration)
         webView = WKWebView(frame: .zero, configuration: configuration)
         self.host = host
         self.surface = surface

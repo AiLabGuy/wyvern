@@ -17,7 +17,7 @@ Network-health probes run about once a second while the window is visible, plus 
 
 Update checks run only after you click Check for Updates…. They contact only the update source shown in Settings > Updates (and, for the download, the host its feed names), over HTTPS, with no cookies. Builds compiled with the developer updater flag may also use a private-network HTTP source; release builds cannot. The app never stores a token. A custom update source and its public key are kept in this Mac's user defaults.
 
-Icon requests use an ephemeral session. A redirect that leaves the page host is refused. Wyvern Browser does not use a third-party icon service. The web view keeps the system default user agent.
+Icon requests use an ephemeral session. A redirect that leaves the page host is refused. Wyvern Browser does not use a third-party icon service. The web view sends the same user agent as Safari on your Mac (WebKit's default plus Safari's `Version/x.y Safari/605.1.15`, read from the installed Safari). It adds no Wyvern-specific token, so sites see an ordinary Safari.
 
 ## Storage on this Mac
 
