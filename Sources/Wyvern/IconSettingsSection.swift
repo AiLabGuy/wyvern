@@ -29,7 +29,7 @@ class IconSettingsSection: NSObject {
         let styles = pane.makeCard(padded: true)
         styles.stack.addArrangedSubview(styleRow)
         styleRow.widthAnchor.constraint(equalTo: styles.stack.widthAnchor).isActive = true
-        styleRow.heightAnchor.constraint(equalToConstant: 96).isActive = true
+        styleRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 96).isActive = true
         pane.addCard(styles.host, to: column)
 
         let choose = DepthButton(title: "Choose…", kind: .secondary)
@@ -262,6 +262,9 @@ class IconStyleChoice: NSButton {
         focusRingType = .none
         imagePosition = .noImage
         setButtonType(.momentaryChange)
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
         refreshAccessibility()
     }
 
@@ -275,9 +278,30 @@ class IconStyleChoice: NSButton {
         setAccessibilityLabel("App icon: \(title)\(suffix)")
     }
 
+    /// Top-down drawing, matching `IconTileLayout`.
+    override var isFlipped: Bool { true }
+
+    private var renderedTitle: NSAttributedString {
+        NSAttributedString(string: title, attributes: [
+            .font: Theme.font(size: 11, weight: .semibold),
+            .foregroundColor: picked ? Theme.accent : Theme.text
+        ])
+    }
+
+    /// Icon plus label. Without this the button is only as tall as its title, and the row's
+    /// centerY alignment leaves the icon outside the bounds (clipped to a sliver).
+    override var intrinsicContentSize: NSSize {
+        IconTileLayout.size(labelHeight: ceil(renderedTitle.size().height))
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        let side = min(bounds.width - 8, 58)
-        let thumb = NSRect(x: bounds.midX - side / 2, y: bounds.height - side - 4, width: side, height: side)
+        let rendered = renderedTitle
+        let textSize = rendered.size()
+        let frames = IconTileLayout.frames(
+            in: bounds.size,
+            labelSize: CGSize(width: ceil(textSize.width), height: ceil(textSize.height))
+        )
+        let thumb = frames.thumb
         if let icon {
             // Uploads keep their aspect ratio. Fit inside the square instead of stretching.
             var fitted = thumb
@@ -301,20 +325,7 @@ class IconStyleChoice: NSButton {
             ring.lineWidth = SettingsContrast.lineWidth
         }
         ring.stroke()
-        let ink = picked ? Theme.accent : Theme.text
-        let font = Theme.font(size: 11, weight: .semibold)
-        let rendered = NSAttributedString(string: title, attributes: [
-            .font: font,
-            .foregroundColor: ink
-        ])
-        let size = rendered.size()
-        let label = NSRect(
-            x: bounds.midX - size.width / 2,
-            y: 2,
-            width: size.width,
-            height: size.height
-        )
-        rendered.draw(with: label, options: [.usesLineFragmentOrigin])
+        rendered.draw(with: frames.label, options: [.usesLineFragmentOrigin])
     }
 
     override func viewDidChangeEffectiveAppearance() {
