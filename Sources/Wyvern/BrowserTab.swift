@@ -5,6 +5,7 @@ import AppKit
 import WyvernCore
 import Darwin
 import WebKit
+import Security
 
 // The Xcode 16+ SDK marks these decision handlers MainActor and Sendable.
 // The witness must match or WebKit treats the optional method as unimplemented.
@@ -12,10 +13,12 @@ import WebKit
 typealias NavigationDecisionHandler = @MainActor @Sendable (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
 typealias ResponseDecisionHandler = @MainActor @Sendable (WKNavigationResponsePolicy) -> Void
 typealias MediaCaptureDecisionHandler = @MainActor @Sendable (WKPermissionDecision) -> Void
+typealias AuthChallengeHandler = @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
 #else
 typealias NavigationDecisionHandler = (WKNavigationActionPolicy, WKWebpagePreferences) -> Void
 typealias ResponseDecisionHandler = (WKNavigationResponsePolicy) -> Void
 typealias MediaCaptureDecisionHandler = (WKPermissionDecision) -> Void
+typealias AuthChallengeHandler = (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
 #endif
 
 enum TabSurface: Equatable {
@@ -109,6 +112,19 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     private var kvmMediaInstalled = false
     /// True after this web view was set to `InactiveSchedulingPolicy.none` for a KVM origin.
     private var kvmInactivePolicyIsNone = false
+    /// True while the in-tab HTML error document is showing, so a failure loading it does not recurse.
+    /// The address bar hides its lock for that document: the URL may still be https, which is not a
+    /// claim that the connection was authenticated.
+    private(set) var isShowingErrorPage = false
+    /// Navigation returned by `loadHTMLString` for the error document. Its own start must not clear
+    /// the flag. `webView.url` during `didStartProvisionalNavigation` is still the previous document,
+    /// so a scheme check on that property cannot tell the error document from the next real load.
+    private var errorPageNavigation: WKNavigation?
+    /// True until the error document's provisional start is observed. Set before `loadHTMLString`
+    /// because that call can invoke `didStart` before it returns a navigation object.
+    private var errorPageStartPending = false
+    /// Shared session allowlist for certificates the person continued past.
+    private let serverTrustAllowlist = ServerTrustAllowlist.shared
 
     static let blankURL: URL = {
         if let url = URL(string: "about:blank") {
@@ -345,6 +361,9 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func load(url: URL, userTypedFile: Bool) {
+        isShowingErrorPage = false
+        errorPageNavigation = nil
+        errorPageStartPending = false
         resetBlockedRequestCount()
         cancelPendingMedia()
         if let page = InternalPage.parse(url) {
@@ -478,6 +497,25 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
 
     private func pullFromWebView() {
         guard !didShutdown, surface == .web else { return }
+        if isShowingErrorPage {
+            // The error document has no committed URL. Keep the failing address and title.
+            let newBack = webView.canGoBack
+            let newForward = webView.canGoForward
+            let newLoading = webView.isLoading
+            let newProgress = webView.estimatedProgress
+            let barsChanged = newBack != canGoBack
+                || newForward != canGoForward
+                || newLoading != isLoading
+            let progressChanged = newProgress != estimatedProgress
+            canGoBack = newBack
+            canGoForward = newForward
+            isLoading = newLoading
+            estimatedProgress = newProgress
+            if barsChanged || progressChanged {
+                host?.browserTabDidUpdate(self, progressOnly: progressChanged && !barsChanged)
+            }
+            return
+        }
         let rawTitle = webView.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let newTitle = rawTitle.isEmpty ? "New Tab" : rawTitle
         let newURL = visibleURL(candidate: webView.url, loading: webView.isLoading)
@@ -524,6 +562,12 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        let isErrorDocument = navigation === errorPageNavigation || errorPageStartPending
+        errorPageStartPending = false
+        if isErrorDocument == false {
+            isShowingErrorPage = false
+            errorPageNavigation = nil
+        }
         currentNavigation = navigation
         if mainFrameStartsPending > 0 {
             mainFrameStartsPending -= 1
@@ -543,7 +587,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         if webView.url?.scheme?.lowercased() != "file" {
             permittedFileURL = nil
         }
-        if surface == .web {
+        if surface == .web, isShowingErrorPage == false {
             committedURL = webView.url
             displayedURL = webView.url
             host?.browserTabDidUpdate(self, progressOnly: false)
@@ -625,13 +669,118 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        _ = error
-        restoreCommittedURL(navigation)
+        presentLoadFailure(navigation: navigation, error: error)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        _ = error
+        presentLoadFailure(navigation: navigation, error: error)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping AuthChallengeHandler
+    ) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = space.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        var evaluateError: CFError?
+        let trusted = SecTrustEvaluateWithError(trust, &evaluateError)
+        if trusted {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+            return
+        }
+
+        let hostName = space.host
+        let port: Int? = space.port > 0 ? space.port : nil
+        if let key = ServerTrustAllowlist.key(host: hostName, port: port, trust: trust),
+           serverTrustAllowlist.contains(key) {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+            return
+        }
+
+        let info = ServerTrustCertificateInfo.from(trust: trust)
+        let displayHost: String = {
+            if let port, port != 443 {
+                return "\(hostName):\(port)"
+            }
+            return hostName.isEmpty ? "this site" : hostName
+        }()
+
+        let alert = NSAlert()
+        alert.messageText = "This connection is not private"
+        alert.informativeText = info.alertBody(hostDisplay: displayHost)
+        alert.alertStyle = .warning
+        // First button is the default. Go Back does not add the certificate to the allowlist.
+        alert.addButton(withTitle: "Go Back")
+        alert.addButton(withTitle: "Continue")
+        if let goBack = alert.buttons.first {
+            goBack.keyEquivalent = "\u{1b}"
+        }
+
+        let finish: (Bool) -> Void = { [weak self] proceed in
+            guard let self else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+                return
+            }
+            if proceed {
+                if let key = ServerTrustAllowlist.key(host: hostName, port: port, trust: trust) {
+                    self.serverTrustAllowlist.allow(key)
+                }
+                completionHandler(.useCredential, URLCredential(trust: trust))
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        }
+
+        if let window = webView.window {
+            alert.beginSheetModal(for: window) { response in
+                finish(response == .alertSecondButtonReturn)
+            }
+        } else {
+            let response = alert.runModal()
+            finish(response == .alertSecondButtonReturn)
+        }
+    }
+
+    private func presentLoadFailure(navigation: WKNavigation?, error: Error) {
+        if let navigation, let errorPageNavigation, navigation === errorPageNavigation {
+            restoreCommittedURL(navigation)
+            return
+        }
+        // A newer navigation already owns the web view. A late cancel must not replace it.
+        if let navigation, let currentNavigation, navigation !== currentNavigation {
+            return
+        }
         restoreCommittedURL(navigation)
+        guard surface == .web else { return }
+        if isShowingErrorPage {
+            return
+        }
+        let copy = LoadFailureCopy.from(error: error)
+        let failing = LoadFailureCopy.failingURL(from: error) ?? displayedURL ?? committedURL
+        // Skip a blank cancel with no URL (common during rapid reloads).
+        if copy.preferSilent, failing == nil {
+            return
+        }
+        let html = LoadFailureCopy.htmlDocument(copy: copy, failingURL: failing)
+        isShowingErrorPage = true
+        // Set before loadHTMLString. WebKit can call didStart before that call returns,
+        // and the navigation object is not assigned until it does.
+        errorPageStartPending = true
+        title = copy.title
+        if let failing {
+            displayedURL = failing
+        }
+        errorPageNavigation = webView.loadHTMLString(html, baseURL: nil)
+        if errorPageNavigation != nil {
+            errorPageStartPending = false
+        }
+        host?.browserTabDidUpdate(self, progressOnly: false)
     }
 
     private func restoreCommittedURL(_ navigation: WKNavigation?) {

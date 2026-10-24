@@ -38,7 +38,7 @@ targets:
       DEFINES_MODULE: YES
       GENERATE_INFOPLIST_FILE: YES
       SKIP_INSTALL: YES
-      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3 -framework Security"
   Wyvern:
     type: application
     platform: macOS
@@ -60,7 +60,7 @@ targets:
       ENABLE_HARDENED_RUNTIME: YES
       ENABLE_APP_SANDBOX: NO
       LD_RUNPATH_SEARCH_PATHS: "$(inherited) @executable_path/../Frameworks"
-      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3 -framework Security"
     postBuildScripts:
       - name: Copy legal notices and icon
         basedOnDependencyAnalysis: false
@@ -90,7 +90,7 @@ targets:
       PRODUCT_BUNDLE_IDENTIFIER: com.example.wyvern.tests
       GENERATE_INFOPLIST_FILE: YES
       TEST_HOST: ""
-      OTHER_LDFLAGS: "$(inherited) -lsqlite3"
+      OTHER_LDFLAGS: "$(inherited) -lsqlite3 -framework Security"
 schemes:
   Wyvern:
     build:
