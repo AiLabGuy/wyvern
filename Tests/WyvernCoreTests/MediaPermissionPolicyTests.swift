@@ -209,7 +209,8 @@ final class MediaPermissionStoreTests: XCTestCase {
         XCTAssertEqual(AppInfo.shortName, "Wyvern")
         XCTAssertEqual(AppInfo.productName, "Wyvern Browser")
         XCTAssertTrue(AppInfo.trademarkFootnote.contains(AppInfo.productName))
-        XCTAssertEqual(AppInfo.marketingVersion, "0.1.0")
+        XCTAssertEqual(AppInfo.marketingVersion, "0.1.1")
+        XCTAssertEqual(AppInfo.buildVersion, "2")
         XCTAssertEqual(AppInfo.fallbackBundleIdentifier, "com.example.wyvern")
         XCTAssertEqual(AppInfo.bundleIdentifier, AppInfo.fallbackBundleIdentifier)
     }

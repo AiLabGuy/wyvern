@@ -82,7 +82,7 @@ The product name, bundle ID, and version live in `config/product.env`. Change `B
 
 ## Updating
 
-**Status:** the updater is a work in progress. It already handles GitHub release download links and any `latest.json` feed on public HTTPS (GitHub, Gitea, or your own web server), but **the v0.1.0 download has no built-in update source and no release signing key**, so it will not find updates by itself. Until a signed release exists, download new versions from the Releases page, or point Wyvern at your own signed source in **Settings > Updates** (see [Using your own update source](#using-your-own-update-source)).
+**Status:** the updater is a work in progress. It already handles GitHub release download links and any `latest.json` feed on public HTTPS (GitHub, Gitea, or your own web server), but **published downloads have no built-in update source and no release signing key**, so the app will not find updates by itself. Until a signed release exists, download new versions from the Releases page, or point Wyvern at your own signed source in **Settings > Updates** (see [Using your own update source](#using-your-own-update-source)).
 
 ### In-app updates (default source: GitHub Releases)
 
