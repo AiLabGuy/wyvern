@@ -32,7 +32,8 @@ let package = Package(
             name: "WyvernCore",
             path: "Sources/WyvernCore",
             linkerSettings: [
-                .linkedLibrary("sqlite3")
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("Security", .when(platforms: [.macOS]))
             ]
         ),
         .executableTarget(
@@ -43,7 +44,8 @@ let package = Package(
             ],
             path: "Sources/Wyvern",
             linkerSettings: [
-                .linkedLibrary("sqlite3")
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("Security", .when(platforms: [.macOS]))
             ]
         ),
         .testTarget(
@@ -54,7 +56,8 @@ let package = Package(
                 .copy("Fixtures")
             ],
             linkerSettings: [
-                .linkedLibrary("sqlite3")
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("Security", .when(platforms: [.macOS]))
             ]
         ),
         .executableTarget(

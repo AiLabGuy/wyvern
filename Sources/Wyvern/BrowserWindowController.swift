@@ -2438,7 +2438,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         reloadButton.setAccessibilityLabel(loading ? "Stop" : "Reload")
         let allowed = Self.allowsBookmark(tab.displayedURL)
         let bookmarked = allowed && tab.displayedURL.flatMap { bookmarks.bookmark(matchingURL: $0.absoluteString) } != nil
-        addressField.present(url: tab.displayedURL, bookmarked: bookmarked, canBookmark: allowed)
+        addressField.present(
+            url: tab.displayedURL,
+            bookmarked: bookmarked,
+            canBookmark: allowed,
+            showsSecurityLock: tab.isShowingErrorPage == false
+        )
         syncKVMAddressBadge()
         syncBlockBadgeForFocusedPane()
         window?.title = "\(tab.title) — \(AppInfo.displayName)"

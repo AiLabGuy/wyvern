@@ -485,7 +485,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         textField.selectAllAfterClick()
     }
 
-    func present(url: URL?, bookmarked: Bool, canBookmark: Bool) {
+    func present(url: URL?, bookmarked: Bool, canBookmark: Bool, showsSecurityLock: Bool = true) {
         commandText = nil
         commandCaption = nil
         showingDevToolsSource = false
@@ -499,11 +499,11 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         star.tint = bookmarked ? Theme.accent : Theme.mute
         star.isEnabled = canBookmark
         star.setAccessibilityLabel(bookmarked ? "Remove Bookmark" : "Add Bookmark")
-        // A lock on http, file, or blob would claim a guarantee the page does not have.
+        // A lock on http, file, blob, or the load-failure document would claim a guarantee the page does not have.
         if url == nil {
             icon.isHidden = false
             icon.glyph = .search
-        } else if AddressSecurity.showsLock(url) {
+        } else if showsSecurityLock && AddressSecurity.showsLock(url) {
             icon.isHidden = false
             icon.glyph = .lock
         } else {
