@@ -20,6 +20,7 @@ public enum AppInfo {
     public static let marketingVersion = "0.1.1"
     public static let buildVersion = "2"
     public static let bookmarksFileName = "bookmarks.json"
+    public static let historyFileName = "history.json"
     public static let terminalBookmarksFileName = "terminal-bookmarks.json"
     public static let mediaPermissionsFileName = "media-permissions.json"
     public static let sitePermissionsFileName = "site-permissions.json"
