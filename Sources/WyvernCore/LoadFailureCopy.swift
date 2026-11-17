@@ -7,13 +7,37 @@ import Foundation
 public struct LoadFailureCopy: Equatable, Sendable {
     public var title: String
     public var detail: String
-    /// When true, the UI may skip showing a page (e.g. a benign cancel with no URL).
+    /// When true, the UI does not show an error page (cancel, or a WebKit load that was interrupted on purpose).
     public var preferSilent: Bool
 
     public init(title: String, detail: String, preferSilent: Bool = false) {
         self.title = title
         self.detail = detail
         self.preferSilent = preferSilent
+    }
+
+    /// WebKit's error domain. Kept as a string so this type does not import WebKit.
+    public static let webKitErrorDomain = "WebKitErrorDomain"
+    /// Frame load interrupted by a policy change (media, download, or a cancelled subframe).
+    public static let webKitFrameLoadInterrupted = 102
+    /// A plug-in (or the media engine) will handle the load.
+    public static let webKitPluginHandledLoad = 204
+
+    /// Real main-frame failures show a page. Cancels, WebKit 102/204, subframe failures,
+    /// and a failure of the error page itself do not.
+    public static func shouldPresentErrorPage(
+        error: Error,
+        isMainFrame: Bool,
+        alreadyShowingErrorPage: Bool
+    ) -> Bool {
+        if alreadyShowingErrorPage || !isMainFrame { return false }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled { return false }
+        if ns.domain == webKitErrorDomain,
+           ns.code == webKitFrameLoadInterrupted || ns.code == webKitPluginHandledLoad {
+            return false
+        }
+        return true
     }
 
     public static func from(error: Error) -> LoadFailureCopy {
@@ -23,6 +47,14 @@ public struct LoadFailureCopy: Equatable, Sendable {
         }
         if let urlError = error as? URLError {
             return from(urlErrorCode: urlError.errorCode, localized: urlError.localizedDescription)
+        }
+        if ns.domain == webKitErrorDomain,
+           ns.code == webKitFrameLoadInterrupted || ns.code == webKitPluginHandledLoad {
+            return LoadFailureCopy(
+                title: "Load interrupted",
+                detail: "The page stopped loading.",
+                preferSilent: true
+            )
         }
         return LoadFailureCopy(
             title: "This page can’t be loaded",
@@ -78,7 +110,7 @@ public struct LoadFailureCopy: Equatable, Sendable {
             return LoadFailureCopy(
                 title: "Load cancelled",
                 detail: "The page stopped loading.",
-                preferSilent: false
+                preferSilent: true
             )
         case NSURLErrorBadURL, NSURLErrorUnsupportedURL:
             return LoadFailureCopy(

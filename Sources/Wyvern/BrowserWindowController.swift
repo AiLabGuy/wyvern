@@ -807,6 +807,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         (window as? BrowserChromeWindow)?.endSuppressingWindowDrag()
     }
 
+    /// Escape during a tab-pointer tracking loop. The key monitor covers the normal path;
+    /// the chrome window calls this when it is feeding `mouseDragged` itself.
+    func noteTabDragEscape() {
+        tileDragCancelled = true
+        tabRegion.cancelTabDrags()
+        endTileDragChrome()
+    }
+
     /// Reads and clears the Esc flag. Mouse-up captures it before the drop runs on the next turn.
     func consumeTileDragCancellation() -> Bool {
         let cancelled = tileDragCancelled
@@ -1727,6 +1735,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSPop
         addressField.translatesAutoresizingMaskIntoConstraints = false
         addressField.onSubmit = { [weak self] text in self?.commit(text: text) }
         addressField.onToggleStar = { [weak self] in self?.toggleBookmark() }
+        addressField.suggestionProvider = { [weak self] text in
+            guard let self else { return [] }
+            return HistoryStore.shared.suggestions(matching: text, bookmarks: self.bookmarks.bookmarks)
+        }
+        addressField.onPickSuggestion = { [weak self] item in
+            guard let url = URL(string: item.url) else { return }
+            self?.loadInActiveTab(url: url, userTypedFile: url.scheme?.lowercased() == "file")
+        }
 
         tabRegion.onSelect = { [weak self] id in
             guard let self else { return }

@@ -116,15 +116,23 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     /// The address bar hides its lock for that document: the URL may still be https, which is not a
     /// claim that the connection was authenticated.
     private(set) var isShowingErrorPage = false
-    /// Navigation returned by `loadHTMLString` for the error document. Its own start must not clear
-    /// the flag. `webView.url` during `didStartProvisionalNavigation` is still the previous document,
-    /// so a scheme check on that property cannot tell the error document from the next real load.
-    private var errorPageNavigation: WKNavigation?
-    /// True until the error document's provisional start is observed. Set before `loadHTMLString`
-    /// because that call can invoke `didStart` before it returns a navigation object.
-    private var errorPageStartPending = false
     /// Shared session allowlist for certificates the person continued past.
     private let serverTrustAllowlist = ServerTrustAllowlist.shared
+    /// Host of the main-frame navigation that has not committed yet. Subresource challenges
+    /// (for example `i.ytimg.com` while `www.youtube.com` loads) do not replace it.
+    private var provisionalMainFrameHost: String?
+    /// Host of the last committed main-frame document.
+    private var committedMainFrameHost: String?
+    /// Set when a main-frame load is allowed. `didFinish` records one visit and clears it.
+    private var pendingVisitRecord = false
+    /// Bumped for each new main-frame attempt. A server redirect keeps the same generation.
+    private var mainFrameGeneration = 0
+    /// Generation captured when a provisional navigation starts, so a superseded `-999` cannot drop the newer visit.
+    private var navigationGenerations: [ObjectIdentifier: Int] = [:]
+    /// True after `didStart` until commit or a failure of that same attempt.
+    private var provisionalDidStart = false
+    /// Set around `load` so a typed URL is not classified as a redirect of the previous attempt.
+    private var explicitMainFrameLoad = false
 
     static let blankURL: URL = {
         if let url = URL(string: "about:blank") {
@@ -362,8 +370,6 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
 
     func load(url: URL, userTypedFile: Bool) {
         isShowingErrorPage = false
-        errorPageNavigation = nil
-        errorPageStartPending = false
         resetBlockedRequestCount()
         cancelPendingMedia()
         if let page = InternalPage.parse(url) {
@@ -385,6 +391,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             title = hostName
         }
         host?.browserTabDidUpdate(self, progressOnly: false)
+        explicitMainFrameLoad = true
         if userTypedFile, url.scheme?.lowercased() == "file" {
             permittedFileURL = url
             let accessRoot = url.deletingLastPathComponent()
@@ -402,6 +409,11 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     func show(_ page: InternalPage) {
         resetBlockedRequestCount()
         cancelPendingMedia()
+        isShowingErrorPage = false
+        pendingVisitRecord = false
+        provisionalMainFrameHost = nil
+        provisionalDidStart = false
+        explicitMainFrameLoad = false
         surface = page == .bookmarks ? .bookmarks : .newTab
         faviconGeneration += 1
         favicon = nil
@@ -530,6 +542,7 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
             || newForward != canGoForward
             || newLoading != isLoading
         let progressChanged = newProgress != estimatedProgress
+        let titleChanged = newTitle != title
         title = newTitle
         displayedURL = newURL
         canGoBack = newBack
@@ -538,6 +551,9 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         estimatedProgress = newProgress
         if barsChanged || progressChanged {
             host?.browserTabDidUpdate(self, progressOnly: progressChanged && !barsChanged)
+        }
+        if titleChanged, !newLoading, !isShowingErrorPage, !pendingVisitRecord {
+            recordVisit(countAsVisit: false)
         }
         if previousHost != newURL?.host {
             if let pending = pendingMediaOriginHost, pending != newURL?.host {
@@ -550,6 +566,11 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     /// While a provisional load is in flight the document is still the previous page.
     /// A page-started navigation keeps that page's URL until `didCommit`.
     private func visibleURL(candidate: URL?, loading: Bool) -> URL? {
+        // The error document is `about:blank`. Keep the failing URL in the bar and do not
+        // replace the committed page, so Back still returns to that page.
+        if isShowingErrorPage {
+            return displayedURL
+        }
         switch AddressCommit.choice(showingTypedTarget: showingTypedTarget, loading: loading) {
         case .keepDisplayed:
             return displayedURL
@@ -562,11 +583,16 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        let isErrorDocument = navigation === errorPageNavigation || errorPageStartPending
-        errorPageStartPending = false
-        if isErrorDocument == false {
-            isShowingErrorPage = false
-            errorPageNavigation = nil
+        // `webView.url` is still the committed document here. Copying its host would make
+        // the new page's certificate look like a subresource (`i.ytimg.com` vs the previous site).
+        // The provisional host was set from the request in `decidePolicyFor`.
+        provisionalDidStart = true
+        if let navigation {
+            navigationGenerations[ObjectIdentifier(navigation)] = mainFrameGeneration
+            if navigationGenerations.count > 32 {
+                let current = ObjectIdentifier(navigation)
+                navigationGenerations = navigationGenerations.filter { $0.key == current }
+            }
         }
         currentNavigation = navigation
         if mainFrameStartsPending > 0 {
@@ -581,16 +607,26 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        provisionalDidStart = false
         clearUserInitiated(navigation)
         cancelPendingMedia()
         showingTypedTarget = false
         if webView.url?.scheme?.lowercased() != "file" {
             permittedFileURL = nil
         }
-        if surface == .web, isShowingErrorPage == false {
-            committedURL = webView.url
-            displayedURL = webView.url
-            host?.browserTabDidUpdate(self, progressOnly: false)
+        let errorDocument = isShowingErrorPage
+            && (webView.url == nil || webView.url?.scheme?.lowercased() == "about")
+        if !errorDocument {
+            isShowingErrorPage = false
+            if let host = webView.url?.host, !host.isEmpty {
+                committedMainFrameHost = host
+            }
+            provisionalMainFrameHost = nil
+            if surface == .web {
+                committedURL = webView.url
+                displayedURL = webView.url
+                host?.browserTabDidUpdate(self, progressOnly: false)
+            }
         }
         applyKVMMediaPolicy(newDocument: true)
     }
@@ -638,6 +674,11 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         }
         guard surface == .web else { return }
         pullFromWebView()
+        let currentAttempt = navigationMatchesActiveAttempt(navigation)
+        if pendingVisitRecord, currentAttempt {
+            pendingVisitRecord = false
+            recordVisit(countAsVisit: true)
+        }
         scheduleFaviconFetch()
         host?.browserTabDidSettle(self)
         applyKVMMediaPolicy(newDocument: false)
@@ -682,27 +723,61 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         completionHandler: @escaping AuthChallengeHandler
     ) {
         let space = challenge.protectionSpace
-        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+        guard ServerTrustPolicy.needsHostSSLPolicy(authenticationMethod: space.authenticationMethod),
               let trust = space.serverTrust else {
             completionHandler(.performDefaultHandling, nil)
             return
         }
 
-        var evaluateError: CFError?
-        let trusted = SecTrustEvaluateWithError(trust, &evaluateError)
-        if trusted {
-            completionHandler(.useCredential, URLCredential(trust: trust))
-            return
-        }
-
         let hostName = space.host
         let port: Int? = space.port > 0 ? space.port : nil
-        if let key = ServerTrustAllowlist.key(host: hostName, port: port, trust: trust),
-           serverTrustAllowlist.contains(key) {
+        // Policy first. Without it, evaluation can match the CN (`*.google.com`) and miss a SAN (`*.ytimg.com`).
+        let trusted = ServerTrustPolicy.isSystemTrusted(trust, host: hostName)
+        let allowlisted = ServerTrustAllowlist.key(host: hostName, port: port, trust: trust)
+            .map { serverTrustAllowlist.contains($0) } ?? false
+        let mainFrame = ServerTrustPolicy.isMainFrameChallenge(
+            protectionSpaceHost: hostName,
+            mainFrameHost: currentMainFrameHost
+        )
+        switch ServerTrustPolicy.disposition(
+            isServerTrust: true,
+            evaluatedTrusted: trusted,
+            sessionAllowlisted: allowlisted,
+            isMainFrame: mainFrame
+        ) {
+        case .performDefaultHandling:
+            completionHandler(.performDefaultHandling, nil)
+        case .useCredential:
             completionHandler(.useCredential, URLCredential(trust: trust))
-            return
+        case .prompt:
+            presentServerTrustPrompt(
+                trust: trust,
+                hostName: hostName,
+                port: port,
+                webView: webView,
+                completionHandler: completionHandler
+            )
         }
+    }
 
+    /// Provisional host while a main-frame load is in flight, otherwise the committed page.
+    private var currentMainFrameHost: String? {
+        if let provisionalMainFrameHost, !provisionalMainFrameHost.isEmpty {
+            return provisionalMainFrameHost
+        }
+        if let committedMainFrameHost, !committedMainFrameHost.isEmpty {
+            return committedMainFrameHost
+        }
+        return committedURL?.host ?? displayedURL?.host
+    }
+
+    private func presentServerTrustPrompt(
+        trust: SecTrust,
+        hostName: String,
+        port: Int?,
+        webView: WKWebView,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
         let info = ServerTrustCertificateInfo.from(trust: trust)
         let displayHost: String = {
             if let port, port != 443 {
@@ -748,39 +823,79 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
     }
 
     private func presentLoadFailure(navigation: WKNavigation?, error: Error) {
-        if let navigation, let errorPageNavigation, navigation === errorPageNavigation {
-            restoreCommittedURL(navigation)
-            return
-        }
-        // A newer navigation already owns the web view. A late cancel must not replace it.
-        if let navigation, let currentNavigation, navigation !== currentNavigation {
-            return
-        }
+        // A click that replaces an in-flight load cancels the old one with -999.
+        // That failure must not drop the visit or the host recorded for the new page.
+        guard navigationMatchesActiveAttempt(navigation) else { return }
+        pendingVisitRecord = false
+        provisionalMainFrameHost = nil
+        provisionalDidStart = false
         restoreCommittedURL(navigation)
         guard surface == .web else { return }
-        if isShowingErrorPage {
+        // `didFail` / `didFailProvisionalNavigation` are main-frame callbacks.
+        guard LoadFailureCopy.shouldPresentErrorPage(
+            error: error,
+            isMainFrame: true,
+            alreadyShowingErrorPage: isShowingErrorPage
+        ) else {
             return
         }
         let copy = LoadFailureCopy.from(error: error)
         let failing = LoadFailureCopy.failingURL(from: error) ?? displayedURL ?? committedURL
-        // Skip a blank cancel with no URL (common during rapid reloads).
-        if copy.preferSilent, failing == nil {
-            return
-        }
         let html = LoadFailureCopy.htmlDocument(copy: copy, failingURL: failing)
+        guard let data = html.data(using: .utf8) else { return }
         isShowingErrorPage = true
-        // Set before loadHTMLString. WebKit can call didStart before that call returns,
-        // and the navigation object is not assigned until it does.
-        errorPageStartPending = true
         title = copy.title
         if let failing {
             displayedURL = failing
         }
-        errorPageNavigation = webView.loadHTMLString(html, baseURL: nil)
-        if errorPageNavigation != nil {
-            errorPageStartPending = false
-        }
+        // Explicit UTF-8. `loadHTMLString` leaves the bytes to encoding sniffing, which
+        // turns the page's apostrophes into mojibake. A cancelled challenge never reaches
+        // here, so Back stays on the previous committed page.
+        webView.load(data, mimeType: "text/html", characterEncodingName: "UTF-8", baseURL: Self.blankURL)
         host?.browserTabDidUpdate(self, progressOnly: false)
+    }
+
+    /// Records the main-frame host for certificate checks and arms one history visit.
+    /// A server redirect keeps the generation of the navigation already in flight so
+    /// `didFinish` still records the final URL. A typed load, link, or reload starts a new attempt.
+    private func noteMainFrameAllow(url: URL, navigationType: WKNavigationType) {
+        let requestedExplicit = explicitMainFrameLoad
+        explicitMainFrameLoad = false
+        let scheme = url.scheme?.lowercased()
+        // The error document is `about:blank`. It must not clear the error flag,
+        // replace the provisional host, or count as a visit.
+        if isShowingErrorPage, scheme == nil || scheme == "about" {
+            return
+        }
+        if let host = url.host, !host.isEmpty {
+            provisionalMainFrameHost = host
+        }
+        pendingVisitRecord = true
+        let replacing = requestedExplicit || navigationType != .other || !provisionalDidStart
+        if replacing {
+            mainFrameGeneration += 1
+            mainFrameStartsPending += 1
+            isShowingErrorPage = false
+        } else if let currentNavigation {
+            navigationGenerations[ObjectIdentifier(currentNavigation)] = mainFrameGeneration
+        }
+    }
+
+    /// True when `navigation` is still the latest main-frame attempt. A missing object
+    /// is treated as current. An untagged navigation is treated as current as well;
+    /// superseded attempts were tagged at `didStart` with an older generation.
+    private func navigationMatchesActiveAttempt(_ navigation: WKNavigation?) -> Bool {
+        guard let navigation else { return true }
+        let key = ObjectIdentifier(navigation)
+        let generation = navigationGenerations.removeValue(forKey: key) ?? mainFrameGeneration
+        return generation == mainFrameGeneration
+    }
+
+    private func recordVisit(countAsVisit: Bool) {
+        guard !didShutdown, surface == .web, !isShowingErrorPage else { return }
+        let url = webView.url ?? committedURL ?? displayedURL
+        guard let url else { return }
+        HistoryStore.shared.record(url: url, title: title, countAsVisit: countAsVisit)
     }
 
     private func restoreCommittedURL(_ navigation: WKNavigation?) {
@@ -974,17 +1089,20 @@ final class BrowserTab: NSObject, WKNavigationDelegate, WKUIDelegate, @unchecked
         switch decision {
         case .allow:
             if mainFrame {
-                mainFrameStartsPending += 1
+                noteMainFrameAllow(url: url, navigationType: navigationAction.navigationType)
             }
             decisionHandler(.allow, preferences)
         case .cancel:
+            if mainFrame { explicitMainFrameLoad = false }
             decisionHandler(.cancel, preferences)
         case .denyFile:
+            if mainFrame { explicitMainFrameLoad = false }
             decisionHandler(.cancel, preferences)
             if mainFrame {
                 host?.browserTabDeniedFile(self)
             }
         case .confirmExternal:
+            if mainFrame { explicitMainFrameLoad = false }
             decisionHandler(.cancel, preferences)
             if mainFrame {
                 host?.browserTab(self, confirmExternal: url)

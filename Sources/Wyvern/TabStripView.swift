@@ -709,6 +709,9 @@ final class TabItemView: NSView {
     /// pointer moves `TabDragPolicy.startDistance`. The chrome window is pinned for the
     /// whole press so AppKit cannot slide the source window with the tab snapshot.
     override func mouseDown(with event: NSEvent) {
+        // Pin the window before any other work. `sendEvent` also does this; a direct
+        // `mouseDown` (the theme-frame path) must not wait until the end of this method.
+        (window?.windowController as? BrowserWindowController)?.prepareTabDrag()
         dragOriginInWindow = event.locationInWindow
         dragCursorInTab = convert(event.locationInWindow, from: nil)
         dragArmed = true
@@ -717,7 +720,6 @@ final class TabItemView: NSView {
         } else {
             dragOriginOnScreen = NSEvent.mouseLocation
         }
-        (window?.windowController as? BrowserWindowController)?.prepareTabDrag()
         onSelect?()
     }
 

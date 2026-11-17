@@ -52,6 +52,49 @@ final class LoadFailureCopyTests: XCTestCase {
         XCTAssertLessThanOrEqual(copy.detail.count, 280)
         XCTAssertTrue(copy.detail.hasSuffix("…"))
     }
+
+    func testCancelledNeverShowsAnErrorPage() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/cancelled"))
+        let error = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorCancelled,
+            userInfo: [NSURLErrorFailingURLErrorKey: url]
+        )
+        let copy = LoadFailureCopy.from(error: error)
+        XCTAssertTrue(copy.preferSilent)
+        XCTAssertFalse(LoadFailureCopy.shouldPresentErrorPage(
+            error: error,
+            isMainFrame: true,
+            alreadyShowingErrorPage: false
+        ))
+        XCTAssertEqual(LoadFailureCopy.failingURL(from: error), url)
+    }
+
+    func testWebKitInterruptionsStaySilent() {
+        let interrupted = NSError(domain: LoadFailureCopy.webKitErrorDomain, code: LoadFailureCopy.webKitFrameLoadInterrupted)
+        let plugin = NSError(domain: LoadFailureCopy.webKitErrorDomain, code: LoadFailureCopy.webKitPluginHandledLoad)
+        XCTAssertTrue(LoadFailureCopy.from(error: interrupted).preferSilent)
+        XCTAssertTrue(LoadFailureCopy.from(error: plugin).preferSilent)
+        XCTAssertFalse(LoadFailureCopy.shouldPresentErrorPage(error: interrupted, isMainFrame: true, alreadyShowingErrorPage: false))
+        XCTAssertFalse(LoadFailureCopy.shouldPresentErrorPage(error: plugin, isMainFrame: true, alreadyShowingErrorPage: false))
+    }
+
+    func testConnectionRefusedStillShowsAnErrorPage() {
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCannotConnectToHost)
+        let copy = LoadFailureCopy.from(error: error)
+        XCTAssertEqual(copy.title, "Couldn’t connect")
+        XCTAssertFalse(copy.preferSilent)
+        XCTAssertTrue(LoadFailureCopy.shouldPresentErrorPage(error: error, isMainFrame: true, alreadyShowingErrorPage: false))
+        XCTAssertFalse(LoadFailureCopy.shouldPresentErrorPage(error: error, isMainFrame: false, alreadyShowingErrorPage: false))
+        XCTAssertFalse(LoadFailureCopy.shouldPresentErrorPage(error: error, isMainFrame: true, alreadyShowingErrorPage: true))
+    }
+
+    func testErrorDocumentKeepsTypographicApostrophes() {
+        let copy = LoadFailureCopy.from(urlErrorCode: NSURLErrorNotConnectedToInternet, localized: "x")
+        let html = LoadFailureCopy.htmlDocument(copy: copy, failingURL: nil)
+        XCTAssertTrue(html.contains("You’re offline"))
+        XCTAssertTrue(html.contains("charset=\"utf-8\""))
+    }
 }
 
 final class ServerTrustAllowlistTests: XCTestCase {

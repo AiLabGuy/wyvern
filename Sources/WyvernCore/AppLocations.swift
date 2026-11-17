@@ -3,7 +3,7 @@
 
 import Foundation
 
-/// Where bookmarks, settings, media permissions, the icon cache, and downloads live.
+/// Where bookmarks, visit history, settings, media permissions, the icon cache, and downloads live.
 /// A launch flag can point this at another directory. The defaults suite name is a hash, not the path.
 public enum AppLocations {
     private static var overrideDirectory: URL?

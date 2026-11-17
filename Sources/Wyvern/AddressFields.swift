@@ -10,7 +10,11 @@ final class SearchField: NSView, NSTextFieldDelegate {
     let textField = NSTextField()
     var onTextChange: ((String) -> Void)?
     var onSubmit: ((String) -> Void)?
+    /// History and bookmarks. Nil leaves this field as a plain search box.
+    var suggestionProvider: ((String) -> [HistorySuggestion])?
+    var onPickSuggestion: ((HistorySuggestion) -> Void)?
     var cornerRadius: CGFloat = MonoMetrics.urlRadius
+    private let suggestions = SuggestionController()
     private let icon = GlyphView()
     private let trailingHost = NSView()
     private var trailingGap: NSLayoutConstraint?
@@ -60,6 +64,14 @@ final class SearchField: NSView, NSTextFieldDelegate {
             trailingHost.centerYAnchor.constraint(equalTo: centerYAnchor),
             zero
         ])
+        suggestions.onPick = { [weak self] item in
+            self?.onPickSuggestion?(item)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        suggestions.reposition()
     }
 
     @available(*, unavailable)
@@ -106,10 +118,27 @@ final class SearchField: NSView, NSTextFieldDelegate {
 
     func controlTextDidChange(_ obj: Notification) {
         onTextChange?(textField.stringValue)
+        refreshSuggestions()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if suggestions.handle(commandSelector) {
+            return true
+        }
+        return false
+    }
+
+    private func refreshSuggestions() {
+        guard let suggestionProvider else {
+            suggestions.dismiss()
+            return
+        }
+        suggestions.update(suggestionProvider(textField.stringValue), anchor: self)
     }
 
     @objc private func submit() {
         BenchMarks.emit("return-keydown")
+        suggestions.dismiss()
         onSubmit?(textField.stringValue)
     }
 }
@@ -322,6 +351,9 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     let textField = AddressTextField()
     var onSubmit: ((String) -> Void)?
     var onToggleStar: (() -> Void)?
+    var suggestionProvider: ((String) -> [HistorySuggestion])?
+    var onPickSuggestion: ((HistorySuggestion) -> Void)?
+    private let suggestions = SuggestionController()
     private let icon = GlyphView()
     private let braces = DevToolsBracesView()
     private let star = ToolButton()
@@ -441,7 +473,15 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
             kvmBadge.heightAnchor.constraint(equalToConstant: 18),
             badgeWidth
         ])
+        suggestions.onPick = { [weak self] item in
+            self?.pickSuggestion(item)
+        }
         applyDisplay()
+    }
+
+    override func layout() {
+        super.layout()
+        suggestions.reposition()
     }
 
     /// KVM pill in the URL strip. Hidden for terminal tabs, DevTools, and sites that are not in the list.
@@ -511,12 +551,14 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         }
         icon.tint = Theme.mute
         guard !editing else { return }
+        suggestions.dismiss()
         applyDisplay()
     }
 
     /// Source URL while DevTools is focused. Muted, read-only, with the `{}` tile.
     /// The star still bookmarks that source page.
     func presentDevTools(url: URL?, bookmarked: Bool, canBookmark: Bool) {
+        suggestions.dismiss()
         editing = false
         commandText = nil
         commandCaption = nil
@@ -546,6 +588,7 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
     }
 
     func presentCommand(_ command: String, caption: String) {
+        suggestions.dismiss()
         editing = false
         showingDevToolsSource = false
         braces.isHidden = true
@@ -589,8 +632,26 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         }
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        guard editing, commandText == nil, !showingDevToolsSource else {
+            suggestions.dismiss()
+            return
+        }
+        let typed = (textField.currentEditor() as? NSTextView)?.string ?? textField.stringValue
+        if let page = pageURL?.absoluteString, typed == page {
+            suggestions.dismiss()
+            return
+        }
+        let items = suggestionProvider?(typed) ?? []
+        suggestions.update(items, anchor: self)
+    }
+
     /// Return submits the field editor's string, then ends editing. Escape reverts. A click away only ends editing.
+    /// Up/Down and Return move through suggestions when the list is open. Escape closes the list first.
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if suggestions.handle(commandSelector) {
+            return true
+        }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
             BenchMarks.emit("return-keydown")
             let typed = textView.string
@@ -623,7 +684,18 @@ final class AddressBarField: NSView, NSTextFieldDelegate {
         }
     }
 
+    private func pickSuggestion(_ item: HistorySuggestion) {
+        suppressRestore = true
+        onPickSuggestion?(item)
+        editing = false
+        suggestions.dismiss()
+        window?.makeFirstResponder(nil)
+        suppressRestore = false
+        applyDisplay()
+    }
+
     private func handleFocusLoss() {
+        suggestions.dismiss()
         guard editing else { return }
         editing = false
         if suppressRestore {
